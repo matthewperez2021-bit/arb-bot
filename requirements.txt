@@ -1,0 +1,34 @@
+# ── API Clients ──────────────────────────────────────────────────────
+requests>=2.31.0
+httpx>=0.27.0                   # async HTTP (Telegram alerts, Kalshi)
+py-clob-client>=0.17.0          # Polymarket CLOB official SDK
+cryptography>=42.0.0            # RSA signing for Kalshi auth
+
+# ── Async ────────────────────────────────────────────────────────────
+asyncio-throttle>=1.0.2         # Rate limiting on API calls
+
+# ── LLM Matching ─────────────────────────────────────────────────────
+anthropic>=0.25.0               # Claude API for market verification
+
+# ── Data / Analysis ──────────────────────────────────────────────────
+pandas>=2.2.0
+numpy>=1.26.0
+matplotlib>=3.8.0               # P&L attribution charts
+
+# ── Database ─────────────────────────────────────────────────────────
+psycopg2-binary>=2.9.9          # PostgreSQL (Phase 5 production)
+# sqlite3 is built-in — no install needed for dev
+
+# ── Scheduling ───────────────────────────────────────────────────────
+APScheduler>=3.10.4
+
+# ── Env / Config ─────────────────────────────────────────────────────
+python-dotenv>=1.0.0
+
+# ── Testing ──────────────────────────────────────────────────────────
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+
+# ── Utilities ────────────────────────────────────────────────────────
+python-dateutil>=2.9.0
+pytz>=2024.1

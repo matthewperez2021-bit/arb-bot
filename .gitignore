@@ -1,0 +1,31 @@
+# Secrets — NEVER commit these
+config/secrets.env
+*.pem
+*.key
+*.p8
+
+# Database
+data/*.db
+data/*.sqlite
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+
+# Snapshots (large files)
+data/snapshots/
+
+# Match cache
+data/match_cache.json
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
