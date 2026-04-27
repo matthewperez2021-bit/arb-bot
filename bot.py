@@ -51,12 +51,16 @@ from risk.risk_manager import RiskManager
 from tracking.position_tracker import PositionTracker
 from tracking.capital_recycler import CapitalRecycler
 from tracking.pnl_attribution import PnlAttribution
+from config.preflight import run_preflight
 from config.settings import (
     SCAN_INTERVAL_SECS,
     STARTING_CAPITAL_USD,
     MATCH_CANDIDATE_THRESHOLD,
     KALSHI_API_KEY_ID,
+    KALSHI_PRIVATE_KEY_PATH,
     POLY_PRIVATE_KEY,
+    POLY_PROXY_WALLET,
+    ANTHROPIC_API_KEY,
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -136,10 +140,17 @@ class ArbBot:
 
     def _preflight(self):
         """Validate critical config before touching any APIs."""
-        if not KALSHI_API_KEY_ID:
-            raise SystemExit("KALSHI_API_KEY_ID not set in secrets.env")
-        if not POLY_PRIVATE_KEY:
-            raise SystemExit("POLY_PRIVATE_KEY not set in secrets.env")
+        result = run_preflight(
+            kalshi_api_key_id=KALSHI_API_KEY_ID,
+            kalshi_private_key_path=KALSHI_PRIVATE_KEY_PATH,
+            poly_private_key=POLY_PRIVATE_KEY,
+            poly_proxy_wallet=POLY_PROXY_WALLET,
+            anthropic_api_key=ANTHROPIC_API_KEY,
+        )
+        for w in result.warnings:
+            logger.warning(w)
+        if not result.ok:
+            raise SystemExit("Preflight failed:\n- " + "\n- ".join(result.errors))
         if self.capital <= 0:
             raise SystemExit(f"Invalid capital: {self.capital}")
         logger.info("Preflight checks passed.")

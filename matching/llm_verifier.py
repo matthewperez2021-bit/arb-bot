@@ -88,8 +88,8 @@ class LLMVerifier:
     PROMPT_TEMPLATE = """\
 You are a prediction market expert. Your job is to determine whether two prediction market questions are asking about the EXACT same real-world event with identical resolution criteria.
 
-Kalshi market:     "{kalshi_title}"
-Polymarket market: "{poly_title}"
+First market (Kalshi):  "{kalshi_title}"
+Second market:          "{poly_title}"
 
 Answer strictly in JSON with no other text:
 {{

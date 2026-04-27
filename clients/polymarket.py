@@ -23,6 +23,11 @@ from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import OrderArgs, OrderType
 from py_clob_client.constants import POLYGON
 
+# Allow running this file directly: `python clients/polymarket.py`
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from config.settings import (
     POLY_CLOB_URL,
     POLY_GAMMA_URL,

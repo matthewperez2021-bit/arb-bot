@@ -1,11 +1,14 @@
 # Secrets — NEVER commit these
 config/secrets.env
+config/Arg-bot.txt
 *.pem
 *.key
 *.p8
 
 # Database
 data/*.db
+data/*.db-shm
+data/*.db-wal
 data/*.sqlite
 
 # Python

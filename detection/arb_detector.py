@@ -6,17 +6,22 @@ identifies profitable arb opportunities after accounting for
 taker fees on both platforms.
 
 The two valid arb directions for a binary market:
-  Direction A: Buy YES on Kalshi  + Buy NO  on Polymarket
-  Direction B: Buy NO  on Kalshi  + Buy YES on Polymarket
+  Direction A: Buy YES on Kalshi  + Buy NO  on second platform
+  Direction B: Buy NO  on Kalshi  + Buy YES on second platform
 
 An arb exists when:
   leg_1_ask + leg_2_ask < 1.00  (before fees)
   (after fees) net_profit_pct >= MIN_NET_EDGE_LIVE
 
+Fee models by second platform:
+  Polymarket:  taker fee = POLY_TAKER_FEE  * price   (2% of order value)
+  PredictIt:   profit fee = PREDICTIT_PROFIT_FEE * (1 - price)
+               (10% of winning payout, converted to a per-contract cost)
+
 Usage:
     from detection.arb_detector import ArbDetector
-    detector = ArbDetector()
-    opp = detector.analyze(kalshi_market, poly_market, kalshi_book, poly_book)
+    detector = ArbDetector(second_platform="predictit")
+    opp = detector.analyze(kalshi_market, pi_market, kalshi_book, pi_book)
     if opp:
         print(f"Arb found: {opp.net_profit_pct:.2%} edge")
 """
@@ -33,6 +38,8 @@ from config.settings import (
     MIN_NET_EDGE_LIVE,
     MIN_NET_EDGE_PAPER,
     POLY_TAKER_FEE,
+    PREDICTIT_PROFIT_FEE,
+    PREDICTIT_MIN_NET_EDGE,
 )
 from detection.book_walker import check_dual_leg_slippage, walk_book
 from detection.scorer import days_until_close, edge_per_day
@@ -59,12 +66,12 @@ class ArbOpportunity:
     kalshi_price:     float     # best ask price (0.0–1.0)
     kalshi_available: float     # contracts at best ask
 
-    # ── Polymarket leg ───────────────────────────────────────────────
+    # ── Second platform leg (Polymarket or PredictIt) ────────────────
     poly_market_id:   str
-    poly_token_id:    str       # the specific YES or NO token to buy
+    poly_token_id:    str       # token_id (Polymarket) or contract_id (PredictIt)
     poly_side:        str       # "yes" or "no"
     poly_price:       float     # best ask price (0.0–1.0)
-    poly_available:   float     # contracts at best ask (converted from USD)
+    poly_available:   float     # contracts at best ask
 
     # ── Economics ────────────────────────────────────────────────────
     gross_cost:       float     # kalshi_price + poly_price (total spent per contract)
@@ -85,6 +92,7 @@ class ArbOpportunity:
     edge_per_day:       float   # annualized edge velocity
 
     # ── Execution metadata ───────────────────────────────────────────
+    second_platform:  str   = "predictit"    # "predictit" | "polymarket"
     detected_at:      float = field(default_factory=time.time)
 
 
@@ -100,17 +108,26 @@ class ArbDetector:
     best opportunity if one exists above the minimum edge threshold.
     """
 
-    def __init__(self, live_mode: bool = False):
+    def __init__(self, live_mode: bool = False, second_platform: str = "polymarket"):
         """
         Args:
-            live_mode: if True, uses MIN_NET_EDGE_LIVE (stricter).
-                       if False, uses MIN_NET_EDGE_PAPER (for paper trading).
+            live_mode:       if True, uses MIN_NET_EDGE_LIVE (stricter).
+                             if False, uses MIN_NET_EDGE_PAPER (for paper trading).
+            second_platform: "predictit" or "polymarket" — controls fee model
+                             and minimum edge threshold for the second leg.
         """
-        self.live_mode = live_mode
-        self.min_edge  = MIN_NET_EDGE_LIVE if live_mode else MIN_NET_EDGE_PAPER
+        self.live_mode       = live_mode
+        self.second_platform = second_platform.lower()
+
+        # PredictIt has much higher fees so we require a larger minimum edge
+        if self.second_platform == "predictit":
+            self.min_edge = PREDICTIT_MIN_NET_EDGE
+        else:
+            self.min_edge = MIN_NET_EDGE_LIVE if live_mode else MIN_NET_EDGE_PAPER
+
         log.info(
-            "ArbDetector initialized (mode=%s, min_edge=%.2f%%)",
-            "LIVE" if live_mode else "PAPER", self.min_edge * 100
+            "ArbDetector initialized (mode=%s, platform=%s, min_edge=%.2f%%)",
+            "LIVE" if live_mode else "PAPER", self.second_platform, self.min_edge * 100
         )
 
     def analyze(
@@ -226,9 +243,19 @@ class ArbDetector:
         gross_profit_pct = (1.0 - gross_cost) / gross_cost
 
         # ── Fee math ─────────────────────────────────────────────────
-        kalshi_fee = KALSHI_TAKER_FEE * k_price   # Kalshi charges % of leg cost
-        poly_fee   = POLY_TAKER_FEE   * p_price   # Poly charges % of leg cost
-        net_cost   = gross_cost + kalshi_fee + poly_fee
+        # Kalshi: taker fee = 7% of the order price
+        kalshi_fee = KALSHI_TAKER_FEE * k_price
+
+        # Second platform fee depends on the platform:
+        #   Polymarket:  2% taker fee on order value
+        #   PredictIt:   10% of winning profit per contract
+        #                = 10% * (1.00 - p_price)   [averaged over outcomes]
+        if self.second_platform == "predictit":
+            poly_fee = PREDICTIT_PROFIT_FEE * (1.0 - p_price)
+        else:
+            poly_fee = POLY_TAKER_FEE * p_price
+
+        net_cost = gross_cost + kalshi_fee + poly_fee
 
         if net_cost >= 1.0:
             return None     # fees wipe out the edge
@@ -290,6 +317,7 @@ class ArbDetector:
             poly_side=        poly_side,
             poly_price=       p_price,
             poly_available=   p_available,
+            second_platform=  self.second_platform,
             gross_cost=       gross_cost,
             gross_profit_pct= gross_profit_pct,
             kalshi_fee=       kalshi_fee,

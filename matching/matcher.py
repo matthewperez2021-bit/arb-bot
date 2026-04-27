@@ -287,7 +287,7 @@ class MarketMatcher:
         matches.sort(key=lambda m: m.score, reverse=True)
 
         log.info(
-            "find_matches: %d kalshi × %d poly → %d candidates "
+            "find_matches: %d kalshi x %d poly -> %d candidates "
             "(rejected: %d below threshold, %d false match)",
             len(kalshi_markets), len(poly_markets), len(matches),
             rejected_thresh, rejected_false,

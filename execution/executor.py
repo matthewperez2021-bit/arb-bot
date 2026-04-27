@@ -488,8 +488,9 @@ class ArbExecutor:
             avg_fill_price=opp.kalshi_price, fill_cost_usd=k_cost,
             status="filled", latency_ms=0.0,
         )
+        second_platform = getattr(opp, "second_platform", "polymarket")
         p_leg = LegResult(
-            platform="polymarket", order_id="SIM",
+            platform=second_platform, order_id="SIM",
             requested_contracts=contracts, filled_contracts=contracts,
             avg_fill_price=opp.poly_price, fill_cost_usd=p_cost,
             status="filled", latency_ms=0.0,

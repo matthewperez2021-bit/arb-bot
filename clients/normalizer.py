@@ -108,11 +108,21 @@ class NormalizedMarket:
     volume_24h:  float = 0.0
     liquidity:   float = 0.0
     fetched_at:  float = field(default_factory=time.time)
+    extra:       dict = field(default_factory=dict)   # platform-specific raw fields
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Kalshi normalizers
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _parse_price(val) -> Optional[float]:
+    """Parse a Kalshi price string like '0.4600' → 0.46, or None if missing/zero."""
+    try:
+        f = float(val)
+        return f if f > 0 else None
+    except (TypeError, ValueError):
+        return None
+
 
 def normalize_kalshi_market(raw: dict) -> NormalizedMarket:
     """
@@ -141,6 +151,17 @@ def normalize_kalshi_market(raw: dict) -> NormalizedMarket:
         category=   raw.get("category", ""),
         volume_24h= float(raw.get("volume", 0)),
         liquidity=  float(raw.get("open_interest", 0)),
+        extra={
+            "floor_strike": raw.get("floor_strike"),
+            "cap_strike":   raw.get("cap_strike"),
+            "strike_type":  raw.get("strike_type"),
+            "subtitle":     raw.get("subtitle", ""),
+            "rules_primary": raw.get("rules_primary", ""),
+            "yes_ask": _parse_price(raw.get("yes_ask_dollars")),
+            "no_ask":  _parse_price(raw.get("no_ask_dollars")),
+            "yes_bid": _parse_price(raw.get("yes_bid_dollars")),
+            "no_bid":  _parse_price(raw.get("no_bid_dollars")),
+        },
     )
 
 

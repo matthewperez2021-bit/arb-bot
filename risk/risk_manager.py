@@ -298,12 +298,13 @@ class RiskManager:
         if k_book is None or p_book is None:
             return True, ""  # Can't check without books
 
-        if not k_book.has_liquidity(MIN_LIQUIDITY_CONTRACTS):
+        # NormalizedMarketBook.has_liquidity is a boolean property, not a function.
+        if not k_book.has_liquidity:
             return (
                 False,
                 f"Kalshi book has <{MIN_LIQUIDITY_CONTRACTS} contracts available",
             )
-        if not p_book.has_liquidity(MIN_LIQUIDITY_CONTRACTS):
+        if not p_book.has_liquidity:
             return (
                 False,
                 f"Polymarket book has <{MIN_LIQUIDITY_CONTRACTS} contracts available",

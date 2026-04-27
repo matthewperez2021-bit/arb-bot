@@ -15,10 +15,17 @@ import base64
 import logging
 import time
 from typing import Optional
+from urllib.parse import urlparse
 
 import requests
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.asymmetric.padding import PSS, MGF1
+
+# Allow running this file directly: `python clients/kalshi.py`
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config.settings import (
     KALSHI_API_KEY_ID,
@@ -105,7 +112,7 @@ class KalshiClient:
 
         signature = self.private_key.sign(
             message,
-            padding.PKCS1v15(),
+            PSS(mgf=MGF1(hashes.SHA256()), salt_length=PSS.MAX_LENGTH),
             hashes.SHA256(),
         )
 
@@ -131,9 +138,11 @@ class KalshiClient:
         Make an authenticated request. Retries on 429 and 5xx with
         exponential backoff. Raises on 4xx (except 429).
         """
-        url     = KALSHI_BASE_URL + path
-        headers = self._sign(method, path)
-        backoff = self.BASE_BACKOFF
+        url      = KALSHI_BASE_URL + path
+        # Kalshi signs the full URL path (e.g. /trade-api/v2/portfolio/balance)
+        full_path = urlparse(KALSHI_BASE_URL).path + path
+        headers  = self._sign(method, full_path)
+        backoff  = self.BASE_BACKOFF
 
         for attempt in range(1, self.MAX_RETRIES + 1):
             try:
@@ -151,7 +160,7 @@ class KalshiClient:
                     raise
                 time.sleep(min(backoff, self.MAX_BACKOFF))
                 backoff *= 2
-                headers = self._sign(method, path)  # timestamp must be fresh
+                headers = self._sign(method, full_path)  # timestamp must be fresh
                 continue
 
             if resp.status_code == 200:
@@ -162,7 +171,7 @@ class KalshiClient:
                 log.warning("Rate limited. Waiting %.1fs (attempt %d/%d)", wait, attempt, self.MAX_RETRIES)
                 time.sleep(wait)
                 backoff *= 2
-                headers = self._sign(method, path)
+                headers = self._sign(method, full_path)
                 continue
 
             if resp.status_code in (500, 502, 503, 504):
@@ -171,7 +180,7 @@ class KalshiClient:
                             resp.status_code, wait, attempt, self.MAX_RETRIES)
                 time.sleep(wait)
                 backoff *= 2
-                headers = self._sign(method, path)
+                headers = self._sign(method, full_path)
                 continue
 
             if resp.status_code == 401:
@@ -220,26 +229,50 @@ class KalshiClient:
 
         return self._request("GET", "/markets", params=params)
 
-    def get_all_open_markets(self, series_ticker: Optional[str] = None) -> list:
+    def get_all_open_markets(
+        self,
+        series_ticker: Optional[str] = None,
+        max_pages: int = 10,
+        ticker_prefix_exclude: Optional[list] = None,
+    ) -> list:
         """
-        Fetch ALL open markets by following pagination cursors.
+        Fetch open markets by following pagination cursors.
 
-        Useful at startup or when refreshing the match cache.
+        Args:
+            series_ticker:          filter to one series (e.g. "KXCPI")
+            max_pages:              safety cap — stop after this many pages
+                                    (200 markets/page, default 10 = 2000 markets max).
+                                    Kalshi has thousands of low-value MVE sports
+                                    markets; cap prevents runaway pagination.
+            ticker_prefix_exclude:  skip markets whose ticker starts with any of
+                                    these prefixes (e.g. ["KXMVE"] to drop
+                                    multi-variant esports/sports event markets).
+
         Returns a flat list of market dicts.
         """
         markets = []
         cursor  = None
+        pages   = 0
+        exclude = [p.upper() for p in (ticker_prefix_exclude or [])]
 
-        while True:
+        while pages < max_pages:
             resp   = self.get_markets(cursor=cursor, series_ticker=series_ticker)
             page   = resp.get("markets", [])
+
+            # Apply ticker prefix filter
+            if exclude:
+                page = [m for m in page
+                        if not any(m.get("ticker", "").upper().startswith(pfx)
+                                   for pfx in exclude)]
+
             markets.extend(page)
+            pages += 1
 
             cursor = resp.get("cursor")
-            if not cursor or not page:
+            if not cursor or not resp.get("markets"):
                 break
 
-            log.debug("Fetched %d markets so far...", len(markets))
+            log.debug("Fetched %d markets so far (page %d)...", len(markets), pages)
 
         log.info("get_all_open_markets: fetched %d total markets", len(markets))
         return markets

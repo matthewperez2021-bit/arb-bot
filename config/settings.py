@@ -6,7 +6,7 @@ All tunable constants live here. Never hardcode these elsewhere.
 import os
 from dotenv import load_dotenv
 
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "secrets.env"))
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "secrets.env"), override=True)
 
 # ─────────────────────────────────────────────────────────────────────
 # PLATFORM CREDENTIALS (loaded from secrets.env)
@@ -14,8 +14,18 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "secrets.env"))
 KALSHI_API_KEY_ID       = os.getenv("KALSHI_API_KEY_ID", "")
 KALSHI_PRIVATE_KEY_PATH = os.getenv("KALSHI_PRIVATE_KEY_PATH", "config/kalshi_private.pem")
 
+# Polymarket — geo-blocked for US users. Kept for reference; replaced by PredictIt.
 POLY_PRIVATE_KEY        = os.getenv("POLY_PRIVATE_KEY", "")
 POLY_PROXY_WALLET       = os.getenv("POLY_PROXY_WALLET", "")
+
+# PredictIt — CFTC no-action letter, US-legal, political markets
+# No API key needed for reads. Account required for trading (manual execution).
+PREDICTIT_ACCOUNT_EMAIL = os.getenv("PREDICTIT_ACCOUNT_EMAIL", "")
+PREDICTIT_ACCOUNT_PASS  = os.getenv("PREDICTIT_ACCOUNT_PASS", "")
+
+# The Odds API — aggregates DraftKings, FanDuel, BetMGM, Caesars etc.
+# Free tier: 500 req/month. Get key at: https://the-odds-api.com
+ODDS_API_KEY            = os.getenv("ODDS_API_KEY", "")
 
 TELEGRAM_BOT_TOKEN      = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID        = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -26,14 +36,54 @@ ANTHROPIC_API_KEY       = os.getenv("ANTHROPIC_API_KEY", "")
 # PLATFORM API ENDPOINTS
 # ─────────────────────────────────────────────────────────────────────
 KALSHI_BASE_URL     = "https://api.elections.kalshi.com/trade-api/v2"
-POLY_GAMMA_URL      = "https://gamma-api.polymarket.com"
-POLY_CLOB_URL       = "https://clob.polymarket.com"
+POLY_GAMMA_URL      = "https://gamma-api.polymarket.com"      # blocked in US
+POLY_CLOB_URL       = "https://clob.polymarket.com"           # blocked in US
+PREDICTIT_BASE_URL  = "https://www.predictit.org/api"
+ODDS_API_BASE_URL   = "https://api.the-odds-api.com"
 
 # ─────────────────────────────────────────────────────────────────────
 # FEE STRUCTURE  (update if platforms change their fee schedule)
 # ─────────────────────────────────────────────────────────────────────
 KALSHI_TAKER_FEE    = 0.07      # 7% of contract price on taker orders
-POLY_TAKER_FEE      = 0.02      # 2% on taker orders
+POLY_TAKER_FEE      = 0.02      # 2% on taker orders (blocked in US)
+
+# PredictIt fee structure — much higher than Kalshi/Poly
+# 10% fee on profits per contract + 10% withdrawal fee
+# Effective round-trip cost: ~18–20%. Require large gross edges.
+PREDICTIT_PROFIT_FEE    = 0.10  # 10% of winnings per contract
+PREDICTIT_WITHDRAWAL_FEE = 0.10 # 10% on cash withdrawals
+PREDICTIT_MIN_NET_EDGE  = 0.15  # 15% minimum net edge for PI arb (vs 2% for Poly)
+
+# The Odds API — sportsbook signal source (not a trading venue)
+ODDS_API_MIN_BOOKS      = 3     # minimum books for consensus to be reliable
+ODDS_API_MIN_EDGE       = 0.04  # 4% minimum edge vs sportsbook consensus
+
+# Sports to actively scan.
+# Each entry = 1 Odds API credit per refresh.
+#
+# Quota math (The Odds API):
+#   Free tier  (500 /mo):  1-2 sports at 6-hr refresh
+#   Starter    ($9.99/mo, 5 000/mo):  7 sports at 2-hr refresh = 3 024/mo ✓
+#   Standard   ($19.99/mo, 15 000/mo): all sports at 45-min refresh
+#
+# Get a key / upgrade at: https://the-odds-api.com
+ODDS_API_ACTIVE_SPORTS: list = [
+    "mlb",          # Baseball         — Apr–Oct
+    "nba",          # Basketball       — Oct–Jun (playoffs Apr–Jun)
+    "nhl",          # Hockey           — Oct–Jun (playoffs Apr–Jun)
+    "nfl",          # American football — Sep–Feb (futures year-round)
+    "mma",          # UFC / MMA        — year-round
+    "mls",          # MLS Soccer       — Feb–Nov
+    "tennis_atp",   # ATP Tennis       — year-round
+]
+
+# How often to re-fetch sportsbook odds (seconds).
+# Starter plan (5 000/mo): 7 sports * 12 refreshes/day * 30 days = 2 520/mo
+ODDS_API_REFRESH_SECS: int   = 7200      # 2 hours
+
+# How many pages of KXMVE sports markets to fetch per scan cycle.
+# 1 page = 200 markets; 3 pages = up to 600 multi-leg Kalshi contracts.
+KALSHI_KXMVE_MAX_PAGES: int  = 3
 
 # ─────────────────────────────────────────────────────────────────────
 # ARB DETECTION THRESHOLDS
@@ -43,6 +93,27 @@ MIN_NET_EDGE_LIVE   = 0.020     # 2.0% — stricter threshold for live trading (
 MAX_SLIPPAGE_PCT    = 0.005     # 0.5% — reject trade if slippage exceeds this
 MAX_BOOK_AGE_SECS   = 5         # Reject order book data older than 5 seconds
 MAX_DURATION_DAYS   = 14        # Only trade markets resolving within 14 days
+
+# ─────────────────────────────────────────────────────────────────────
+# KALSHI MARKET SERIES
+# ─────────────────────────────────────────────────────────────────────
+# Economic/financial series that Kalshi always has open.
+# Fetched explicitly via series_ticker= to bypass the KXMVE sports
+# pagination flood (4000+ markets that fill all pages before political ones).
+#
+# Political/governance series are NOT listed here because Kalshi
+# currently has no open political markets (2026 midterm cycle not yet
+# started). They will be added back once Kalshi lists them:
+#   "KXPRES", "KXSEN", "KXHOUSE", "KXGOV"  ← add when they open
+KALSHI_ECONOMIC_SERIES: list = ["KXCPI", "KXFED", "KXGDP", "KXBTC"]
+
+# Max pages to fetch per series_ticker query (200 markets/page).
+# Each series has at most a few hundred markets, so 5 pages is plenty.
+KALSHI_SERIES_MAX_PAGES: int  = 5
+
+# Max pages for the supplemental general scan (catches any political
+# markets once Kalshi lists them). Keep small — KXMVE fills all pages.
+KALSHI_GENERAL_MAX_PAGES: int = 1
 
 # ─────────────────────────────────────────────────────────────────────
 # MARKET MATCHING THRESHOLDS
