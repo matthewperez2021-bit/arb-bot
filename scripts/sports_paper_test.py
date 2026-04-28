@@ -210,12 +210,96 @@ class PaperTrade:
     books_used: int
     legs_priced: int
     legs_total: int
+    close_time: str = ""
 
 
 def _bar(label: str, width: int = 66) -> str:
     """Print a header bar."""
     pad = max(0, width - len(label) - 4)
     return f"  {'-' * 2} {label} {'-' * pad}"
+
+
+def _fmt_close_time(iso: str) -> str:
+    """Format an ISO 8601 UTC close_time into a readable 'When' string."""
+    if not iso:
+        return "unknown"
+    try:
+        from datetime import timezone
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        now = datetime.now(timezone.utc)
+        delta = dt - now
+        days  = delta.days
+        hours = int(delta.total_seconds() // 3600)
+        mins  = int((delta.total_seconds() % 3600) // 60)
+
+        if days < 0:
+            label = "already closed"
+        elif hours < 1:
+            label = f"in ~{mins}m"
+        elif hours < 24:
+            label = f"in ~{hours}h {mins}m"
+        elif days == 1:
+            label = "tomorrow"
+        else:
+            label = f"in {days} days"
+
+        return dt.strftime("%Y-%m-%d %H:%M UTC") + f"  ({label})"
+    except Exception:
+        return iso
+
+
+def print_trade_card(trade: "PaperTrade", opp: "OddsArbOpportunity"):
+    """Print a WHO / WHAT / WHEN / WHY card for one paper trade."""
+    w = 68
+
+    # WHO — teams and their individual win probabilities
+    if opp.leg_details:
+        who_parts = [f"{name} ({prob*100:.0f}%)" for name, prob in opp.leg_details]
+        who_str = "  +  ".join(who_parts)
+    else:
+        who_str = trade.ticker
+
+    # WHAT — side, contracts, price, total stake
+    side_word = "BUY YES" if trade.side == "YES" else "BUY NO"
+    what_str  = (
+        f"{side_word}  |  {trade.contracts} contracts "
+        f"@ ${trade.cost:.4f} ea  =  ${trade.stake:.2f} total"
+    )
+
+    # WHEN — resolution time
+    when_str = _fmt_close_time(trade.close_time)
+
+    # WHY — the mispricing logic
+    cost_pct    = trade.cost * 100
+    fair_pct    = trade.fair_prob * 100
+    edge_pct    = trade.net_edge * 100
+    fee_drag    = trade.ask * KALSHI_TAKER_FEE * 100
+    why_line1   = (
+        f"Kalshi prices at {trade.ask*100:.1f}c  |  "
+        f"sportsbooks imply {fair_pct:.1f}c fair value  |  "
+        f"7% fee costs {fee_drag:.1f}c"
+    )
+    why_line2 = (
+        f"Net edge: {fair_pct:.1f}% fair - {cost_pct:.1f}% cost = {edge_pct:+.1f}%  |  "
+        f"{trade.books_used} books  |  {trade.legs_priced}/{trade.legs_total} legs fully priced"
+    )
+
+    # EXP — expected outcome
+    exp_str = (
+        f"${trade.expected_profit:.4f} expected profit  |  "
+        f"Kelly fraction: {trade.kelly_frac*100:.1f}% of bankroll"
+    )
+
+    print(f"  {'─'*w}")
+    print(f"  Trade #{trade.id}  [{trade.sport}]")
+    print(f"  {'─'*w}")
+    print(f"  WHO  : {who_str}")
+    print(f"  WHAT : {what_str}")
+    print(f"  WHEN : {when_str}")
+    print(f"  WHY  : {why_line1}")
+    print(f"         {why_line2}")
+    print(f"  EXP  : {exp_str}")
+    print()
 
 
 def run_paper_test(capital: float, max_per_trade: float, verbose: bool = False):
@@ -366,6 +450,9 @@ def run_paper_test(capital: float, max_per_trade: float, verbose: bool = False):
 
     # Paper mode: lower min_books to 2 (live would require 3)
     scanner.min_books = 2
+
+    # Lookup for close_time by ticker (used in trade cards)
+    market_lookup = {km.market_id: km for km in team_only_markets}
 
     def fetch_kxmve_book(market):
         from clients.normalizer import NormalizedBook, NormalizedMarketBook, PriceLevel
@@ -536,10 +623,12 @@ def run_paper_test(capital: float, max_per_trade: float, verbose: bool = False):
         exp_profit    = contracts * opp.net_edge
         net_edge_pct  = opp.net_edge * 100
 
+        km = market_lookup.get(opp.kalshi_ticker)
         trade = PaperTrade(
             id            = i,
             ticker        = opp.kalshi_ticker,
             title         = opp.kalshi_title[:60] if opp.kalshi_title else "",
+            close_time    = km.close_time if km else "",
             side          = opp.kalshi_side.upper(),
             ask           = opp.kalshi_price,
             cost          = cost,
@@ -600,7 +689,17 @@ def run_paper_test(capital: float, max_per_trade: float, verbose: bool = False):
             f"{t.contracts:>5}  ${t.stake:>6.2f}  ${t.expected_profit:>8.4f}"
         )
 
-    # ── Step 6: Portfolio summary ─────────────────────────────────────────────
+    # ── Step 6: Trade detail cards ───────────────────────────────────────────
+    print()
+    print(_bar("TRADE DETAILS  (WHO / WHAT / WHEN / WHY)"))
+    print()
+    opp_by_ticker = {o.kalshi_ticker: o for o in opportunities}
+    for trade in trades:
+        opp = opp_by_ticker.get(trade.ticker)
+        if opp:
+            print_trade_card(trade, opp)
+
+    # ── Step 7: Portfolio summary ─────────────────────────────────────────────
     total_expected   = sum(t.expected_profit for t in trades)
     total_deployed   = sum(t.stake for t in trades)
     total_contracts  = sum(t.contracts for t in trades)
