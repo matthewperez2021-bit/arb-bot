@@ -25,6 +25,7 @@ Usage:
 
 import logging
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -151,6 +152,7 @@ class OddsArbScanner:
         kalshi_markets: list,
         fetch_book: Callable[[NormalizedMarket], Optional[NormalizedMarketBook]],
         sportsbook_events: list,
+        prop_cache: dict = None,
     ) -> list:
         """
         Main entry point. Returns OddsArbOpportunity list sorted by net_edge desc.
@@ -168,7 +170,8 @@ class OddsArbScanner:
             return []
 
         # Build team-name variant lookup once from all events
-        team_variants = build_team_variants(sportsbook_events)
+        team_variants  = build_team_variants(sportsbook_events)
+        self._prop_cache = prop_cache or {}
         log.info(
             "OddsArbScanner: %d markets | %d sportsbook events | %d team variants",
             len(kalshi_markets), len(sportsbook_events), len(team_variants),
@@ -269,38 +272,81 @@ class OddsArbScanner:
         )
         return opp, near_miss
 
+    @staticmethod
+    def _normalize_player(name: str) -> str:
+        """Lowercase + strip diacritics for player name matching."""
+        nfkd = unicodedata.normalize("NFKD", name)
+        return "".join(c for c in nfkd if not unicodedata.combining(c)).lower().strip()
+
     def _price_leg(
         self,
         leg:           KXMVELeg,
         team_variants: dict,
     ) -> Optional[tuple]:
         """
-        Price one leg by looking up the team/player in team_variants.
+        Price one leg. Returns (probability: float, books_used: int, sport: str) or None.
 
-        Returns (probability: float, books_used: int, sport: str) or None.
-
-        Currently handles:
-          - team_win:    P(team wins their current game)
-          - team_spread: P(team wins by over X) — approximated via moneyline
-          - total_over:  P(total goes over X) — approximated via total market
-          - player_over: not priced (requires separate player-prop API call)
+        Handles:
+          - team_win / team_spread: devigged sportsbook moneyline consensus
+          - player_over:            sportsbook player prop (requires prop_cache)
+          - total_over:             not priced (no totals market fetched)
         """
-        if leg.leg_type == "player_over":
-            # Player props require a separate Odds API endpoint per event.
-            # Not yet implemented — skip these legs for now.
-            # Coverage ratio will still pass if other legs price successfully.
-            return None
-
         if leg.leg_type in ("team_win", "team_spread"):
             return self._price_team_leg(leg, team_variants)
 
-        if leg.leg_type == "total_over":
-            # Totals are hard to price without fetching "totals" market data.
-            # Approximation: treat it as 50/50 prior (unknown probability).
-            # TODO: fetch totals market from Odds API to price properly.
+        if leg.leg_type == "player_over":
+            return self._price_player_leg(leg)
+
+        # total_over: would need a separate totals market fetch — skip for now
+        return None
+
+    def _price_player_leg(self, leg: KXMVELeg) -> Optional[tuple]:
+        """
+        Look up a player_over leg in the prop_cache.
+
+        KXMVE "25+" → sportsbook "Over 24.5" → target_line = threshold - 0.5
+        Searches within ±1.0 point tolerance to handle line variations.
+
+        Returns (over_prob, n_books, "") or None.
+        """
+        if not self._prop_cache or leg.threshold is None:
             return None
 
-        return None
+        player_norm  = self._normalize_player(leg.subject)
+        target_line  = leg.threshold - 0.5   # "25+" → 24.5
+
+        entries = self._prop_cache.get(player_norm)
+
+        # Fallback: last-name match (handles slight spelling differences)
+        if not entries:
+            last_name = player_norm.split()[-1] if player_norm.split() else ""
+            if len(last_name) >= 4:
+                for cached_player, cached_entries in self._prop_cache.items():
+                    if cached_player.split()[-1] == last_name:
+                        entries = cached_entries
+                        break
+
+        if not entries:
+            return None
+
+        # Find the entry whose line is closest to target_line (within ±1.0)
+        best      = None
+        best_dist = float("inf")
+        for (line, prob, n_books, mkt_key) in entries:
+            dist = abs(line - target_line)
+            if dist < best_dist and dist <= 1.0:
+                best_dist = dist
+                best = (prob, n_books, mkt_key)
+
+        if best is None:
+            return None
+
+        prob, n_books, _mkt = best
+        log.debug(
+            "Player prop: %s threshold=%.1f target_line=%.1f prob=%.3f books=%d",
+            leg.subject, leg.threshold, target_line, prob, n_books,
+        )
+        return prob, n_books, ""
 
     def _price_team_leg(
         self,

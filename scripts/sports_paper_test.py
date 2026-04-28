@@ -422,26 +422,66 @@ def run_paper_test(capital: float, max_per_trade: float, verbose: bool = False):
         print(f"      {t}")
     print()
 
-    # ── Step 3b: Filter to team-only KXMVE markets ───────────────────────────
-    # Player props (player_over) and totals (total_over) cannot be priced via
-    # the h2h Odds API endpoint. When a market mixes team_win + player_over legs
-    # only the team_win leg is priced, making fair_prob >> true parlay prob and
-    # creating a large spurious "edge". Filter them out entirely.
+    # ── Step 3b: Fetch player prop odds for relevant events ───────────────────
+    print(_bar("STEP 3b  Player prop odds  (per-event fetch)"))
     from detection.kxmve_parser import KXMVEParser as _Parser
-    unpriceable_types = {"player_over", "total_over"}
+    from detection.kxmve_parser import build_team_variants as _build_tv
 
-    team_only_markets = []
+    _team_variants_for_props = _build_tv(events)
+
+    # Find which events have KXMVE markets with player legs
+    events_to_fetch: list = []
+    seen_event_ids: set   = set()
+    for km in kxmve_markets:
+        legs = _Parser.parse(km.title)
+        has_player = any(l.leg_type == "player_over" for l in legs)
+        if not has_player:
+            continue
+        for leg in legs:
+            if leg.leg_type not in ("team_win", "team_spread"):
+                continue
+            match = _team_variants_for_props.get(leg.subject)
+            if not match:
+                continue
+            _, ev = match
+            eid = ev.get("id", "")
+            sk  = ev.get("sport_key", "")
+            if eid and eid not in seen_event_ids:
+                seen_event_ids.add(eid)
+                events_to_fetch.append((sk, eid))
+
+    t0 = time.perf_counter()
+    prop_cache = scanner.odds_client.build_player_prop_cache(
+        events_to_fetch, max_events=15
+    )
+    elapsed = time.perf_counter() - t0
+    print(f"    Events with player legs:  {len(events_to_fetch):,}")
+    print(f"    Players in prop cache:    {len(prop_cache):,}  [{elapsed:.1f}s]")
+    quota = scanner.odds_client.quota_remaining()
+    if quota is not None:
+        print(f"    Odds API quota remaining: {quota} requests")
+    print()
+
+    # ── Step 3c: Filter markets — exclude total_over legs only ───────────────
+    # total_over (game totals) are still unpriced. player_over legs are now
+    # priceable via prop_cache. Markets with totals are skipped to avoid
+    # partial-pricing artifacts.
+    scannable_markets = []
     for km in kxmve_markets:
         legs = _Parser.parse(km.title)
         if not legs:
             continue
-        if any(l.leg_type in unpriceable_types for l in legs):
-            continue   # has a player prop or total → can't price all legs → skip
-        team_only_markets.append(km)
+        if any(l.leg_type == "total_over" for l in legs):
+            continue   # game totals still unpriced → skip
+        scannable_markets.append(km)
 
-    print(f"    Team-only (no props/totals): {len(team_only_markets):,} / {len(kxmve_markets):,} markets")
-    print(f"    Mixed/prop-only markets skipped: {len(kxmve_markets) - len(team_only_markets):,}")
-    print(f"    (Prop/total markets skipped to avoid inflated edge from partial leg pricing)")
+    n_with_props   = sum(
+        1 for km in scannable_markets
+        if any(l.leg_type == "player_over" for l in _Parser.parse(km.title))
+    )
+    print(f"    Scannable markets (no totals): {len(scannable_markets):,} / {len(kxmve_markets):,}")
+    print(f"    Of which include player legs:  {n_with_props:,}")
+    print(f"    Markets skipped (have totals): {len(kxmve_markets) - len(scannable_markets):,}")
     print()
 
     # ── Step 4: Scan for mispricings (paper mode — min_books=2) ──────────────
@@ -452,7 +492,7 @@ def run_paper_test(capital: float, max_per_trade: float, verbose: bool = False):
     scanner.min_books = 2
 
     # Lookup for close_time by ticker (used in trade cards)
-    market_lookup = {km.market_id: km for km in team_only_markets}
+    market_lookup = {km.market_id: km for km in scannable_markets}
 
     def fetch_kxmve_book(market):
         from clients.normalizer import NormalizedBook, NormalizedMarketBook, PriceLevel
@@ -474,10 +514,10 @@ def run_paper_test(capital: float, max_per_trade: float, verbose: bool = False):
 
     try:
         opportunities: List[OddsArbOpportunity] = scanner.scan(
-            team_only_markets, fetch_kxmve_book, events
+            scannable_markets, fetch_kxmve_book, events, prop_cache=prop_cache
         )
         elapsed = time.perf_counter() - t0
-        print(f"    Scanned {len(team_only_markets):,} team-only markets in {elapsed:.1f}s "
+        print(f"    Scanned {len(scannable_markets):,} markets in {elapsed:.1f}s "
               f"-> {len(opportunities)} opportunities (min_edge={MIN_NET_EDGE_PAPER:.1%}, min_books=2)")
     except Exception as e:
         print(f"    ERROR: scan failed — {e}")
@@ -514,7 +554,7 @@ def run_paper_test(capital: float, max_per_trade: float, verbose: bool = False):
             scanner.min_edge = 0.0
             scanner.min_books = 1
             near_misses_all: List[OddsArbOpportunity] = scanner.scan(
-                team_only_markets, fetch_kxmve_book, events
+                scannable_markets, fetch_kxmve_book, events, prop_cache=prop_cache
             )
             if near_misses_all:
                 top = near_misses_all[:10]

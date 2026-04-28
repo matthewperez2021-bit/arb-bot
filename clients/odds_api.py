@@ -24,8 +24,11 @@ Usage:
     signals = client.get_kalshi_signals(events, kalshi_markets)
 """
 
+import json
 import logging
+import os
 import time
+import unicodedata
 from typing import Optional
 
 import requests
@@ -75,6 +78,46 @@ SPORTS = {
     "tennis":       "tennis_atp_us_open",
     "golf_pga":     "golf_pga_championship",
 }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Player prop market keys per sport (Odds API event-level endpoint)
+# ─────────────────────────────────────────────────────────────────────────────
+
+PLAYER_PROP_MARKETS: dict = {
+    "basketball_nba": [
+        "player_points",
+        "player_rebounds",
+        "player_assists",
+        "player_threes",
+        "player_blocks",
+        "player_steals",
+        "player_points_rebounds_assists",
+        "player_points_rebounds",
+        "player_points_assists",
+        "player_rebounds_assists",
+    ],
+    "baseball_mlb": [
+        "batter_hits",
+        "batter_rbis",
+        "batter_home_runs",
+        "pitcher_strikeouts",
+        "batter_runs_scored",
+    ],
+    "icehockey_nhl": [
+        "player_points",
+        "player_goals",
+        "player_assists",
+        "player_shots_on_goal",
+    ],
+    "soccer_usa_mls": [
+        "player_shots",
+        "player_shots_on_target",
+    ],
+}
+
+# Prop cache TTL (seconds) — props don't move as fast as h2h lines
+PROP_CACHE_TTL_SECS = 1800   # 30 minutes
+PROP_CACHE_PATH     = "data/player_prop_cache.json"
 
 # Books to pull (these are the most liquid US books)
 DEFAULT_BOOKMAKERS = [
@@ -367,6 +410,203 @@ class OddsAPIClient:
             team_name, consensus, len(devigged_probs)
         )
         return consensus
+
+    # ─────────────────────────────────────────────────────────────────
+    # Player props
+    # ─────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def normalize_player_name(name: str) -> str:
+        """Lowercase + strip diacritics for fuzzy player matching."""
+        nfkd = unicodedata.normalize("NFKD", name)
+        ascii_name = "".join(c for c in nfkd if not unicodedata.combining(c))
+        return ascii_name.lower().strip()
+
+    def get_player_props(
+        self,
+        sport_key: str,
+        event_id: str,
+        regions: str = "us",
+        odds_format: str = "american",
+    ) -> dict:
+        """
+        Fetch player prop odds for one event.
+
+        Returns a prop_cache fragment:
+            {normalized_player_name: [(line, over_prob, n_books, market_key), ...]}
+
+        One API credit per call — call sparingly and cache the result.
+        """
+        markets = PLAYER_PROP_MARKETS.get(sport_key, [])
+        if not markets:
+            return {}
+
+        params = {
+            "markets":    ",".join(markets),
+            "regions":    regions,
+            "oddsFormat": odds_format,
+        }
+
+        try:
+            data = self._get(
+                f"/v4/sports/{sport_key}/events/{event_id}/odds",
+                params=params,
+            )
+        except OddsAPIError as exc:
+            if exc.status_code in (404, 422):
+                log.debug("No player props for event %s (%s)", event_id, exc)
+                return {}
+            raise
+
+        return self._parse_player_props(data)
+
+    def _parse_player_props(self, event_data: dict) -> dict:
+        """
+        Parse an event-level odds response into the prop_cache structure.
+
+        prop_cache: {normalized_player: [(line, over_prob, n_books, mkt_key)]}
+
+        Devigging: each book supplies an Over + Under line; we devig the pair.
+        If only Over is available (some books), use raw implied prob.
+        """
+        # Accumulate per (player_norm, line, mkt_key, book_key): {over/under: raw_prob}
+        book_sides: dict = {}
+
+        for book in event_data.get("bookmakers", []):
+            book_key = book.get("key", "")
+            for market in book.get("markets", []):
+                mkt_key = market.get("key", "")
+                for outcome in market.get("outcomes", []):
+                    # Player name lives in "description", bet type in "name"
+                    player_raw = outcome.get("description") or outcome.get("name", "")
+                    bet_type   = outcome.get("name", "").lower()  # "over" / "under"
+                    point      = outcome.get("point")
+                    price      = outcome.get("price")
+
+                    if not player_raw or point is None or price is None:
+                        continue
+                    if bet_type not in ("over", "under"):
+                        continue
+
+                    key = (
+                        self.normalize_player_name(player_raw),
+                        float(point),
+                        mkt_key,
+                        book_key,
+                    )
+                    book_sides.setdefault(key, {})[bet_type] = self.american_to_implied(price)
+
+        # Devig Over/Under pairs and aggregate across books
+        # Group by (player_norm, line, mkt_key)
+        per_entry: dict = {}    # (player_norm, line, mkt_key) → [devigged_over_prob]
+
+        for (player_norm, line, mkt_key, _book), sides in book_sides.items():
+            over_raw  = sides.get("over")
+            under_raw = sides.get("under")
+            if over_raw is None:
+                continue
+
+            if under_raw is not None:
+                total = over_raw + under_raw
+                devigged_over = over_raw / total if total > 0 else over_raw
+            else:
+                devigged_over = over_raw   # can't devig without both sides
+
+            per_entry.setdefault((player_norm, line, mkt_key), []).append(devigged_over)
+
+        # Average across books → final cache
+        result: dict = {}
+        for (player_norm, line, mkt_key), probs in per_entry.items():
+            avg_prob = sum(probs) / len(probs)
+            result.setdefault(player_norm, []).append(
+                (line, avg_prob, len(probs), mkt_key)
+            )
+
+        log.debug(
+            "Parsed player props: %d players from event",
+            len(result),
+        )
+        return result
+
+    def build_player_prop_cache(
+        self,
+        events_to_fetch: list,       # list of (sport_key, event_id) tuples
+        max_events: int = 15,
+        cache_path: str = PROP_CACHE_PATH,
+        cache_ttl: int = PROP_CACHE_TTL_SECS,
+    ) -> dict:
+        """
+        Build a merged player prop cache for a list of (sport_key, event_id) pairs.
+
+        Reads from disk cache first (TTL = cache_ttl seconds).
+        Only fetches events not already in the cache.
+
+        Returns merged prop_cache dict:
+            {normalized_player_name: [(line, over_prob, n_books, market_key), ...]}
+        """
+        os.makedirs(os.path.dirname(cache_path) if os.path.dirname(cache_path) else ".", exist_ok=True)
+
+        # Load existing cache if fresh enough
+        cached_data: dict = {}
+        cached_event_ids: set = set()
+        cache_ts = 0.0
+
+        if os.path.exists(cache_path):
+            try:
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    saved = json.load(f)
+                cache_ts = saved.get("_ts", 0.0)
+                if time.time() - cache_ts < cache_ttl:
+                    cached_data       = saved.get("prop_cache", {})
+                    cached_event_ids  = set(saved.get("event_ids", []))
+                    log.debug(
+                        "Player prop cache HIT (age=%.0fs, %d players)",
+                        time.time() - cache_ts, len(cached_data),
+                    )
+            except Exception as exc:
+                log.debug("Failed to read prop cache: %s", exc)
+
+        # Only fetch events not already cached
+        to_fetch = [
+            (sk, eid) for sk, eid in events_to_fetch[:max_events]
+            if eid not in cached_event_ids
+        ]
+
+        if to_fetch:
+            log.info("Fetching player props for %d events", len(to_fetch))
+
+        merged = dict(cached_data)
+        new_event_ids = set(cached_event_ids)
+
+        for sport_key, event_id in to_fetch:
+            try:
+                fragment = self.get_player_props(sport_key, event_id)
+                for player, entries in fragment.items():
+                    if player not in merged:
+                        merged[player] = []
+                    # Merge without duplicates (same line + mkt_key)
+                    existing_keys = {(e[0], e[3]) for e in merged[player]}
+                    for entry in entries:
+                        if (entry[0], entry[3]) not in existing_keys:
+                            merged[player].append(entry)
+                new_event_ids.add(event_id)
+                log.debug("Props fetched for event %s: %d players", event_id, len(fragment))
+            except Exception as exc:
+                log.warning("Failed to fetch props for %s/%s: %s", sport_key, event_id, exc)
+
+        # Save updated cache to disk
+        if to_fetch:
+            try:
+                with open(cache_path, "w", encoding="utf-8") as f:
+                    json.dump({
+                        "_ts":        time.time(),
+                        "event_ids":  list(new_event_ids),
+                        "prop_cache": merged,
+                    }, f)
+            except Exception as exc:
+                log.warning("Failed to write prop cache: %s", exc)
+
+        return merged
 
     # ─────────────────────────────────────────────────────────────────
     # Kalshi signal generation
