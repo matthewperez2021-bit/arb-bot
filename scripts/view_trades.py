@@ -252,8 +252,103 @@ def show_all(conn):
     print()
 
 
+def show_status(conn):
+    """Compact one-screen dashboard: bankroll + live positions + session count."""
+    from datetime import datetime, timezone
+
+    # ── Bankroll ────────────────────────────────────────────────────────────
+    try:
+        br = conn.execute("SELECT * FROM bankroll WHERE id=1").fetchone()
+    except Exception:
+        br = None
+
+    if br:
+        br = dict(br)
+        start   = br["starting_capital"]
+        current = br["current_capital"]
+        wins    = br["wins"]
+        losses  = br["losses"]
+        settled = br["total_trades"]
+    else:
+        start   = STARTING_CAPITAL_USD
+        settled_profit = conn.execute(
+            "SELECT COALESCE(SUM(actual_profit),0) FROM sports_paper_trades "
+            "WHERE outcome IN ('won','lost')"
+        ).fetchone()[0] or 0
+        wins    = conn.execute("SELECT COUNT(*) FROM sports_paper_trades WHERE outcome='won'").fetchone()[0]
+        losses  = conn.execute("SELECT COUNT(*) FROM sports_paper_trades WHERE outcome='lost'").fetchone()[0]
+        settled = wins + losses
+        current = start + settled_profit
+
+    pnl     = current - start
+    pnl_pct = pnl / start * 100
+    win_rate = wins / settled * 100 if settled else 0
+
+    # ── Open positions ───────────────────────────────────────────────────────
+    open_row = conn.execute(
+        "SELECT COUNT(*) AS cnt, "
+        "       COALESCE(SUM(total_stake), 0) AS deployed, "
+        "       COALESCE(SUM(expected_profit), 0) AS exp_profit "
+        "FROM sports_paper_trades WHERE outcome='open' OR outcome IS NULL"
+    ).fetchone()
+    open_cnt  = open_row["cnt"]
+    deployed  = open_row["deployed"]
+    exp_open  = open_row["exp_profit"]
+    deployed_pct = deployed / current * 100 if current else 0
+
+    # ── Sessions ─────────────────────────────────────────────────────────────
+    sessions  = conn.execute(
+        "SELECT COUNT(DISTINCT session_id) FROM sports_paper_trades"
+    ).fetchone()[0]
+    last_scan = conn.execute(
+        "SELECT MAX(opened_at) FROM sports_paper_trades"
+    ).fetchone()[0]
+    if last_scan:
+        try:
+            dt  = datetime.fromisoformat(last_scan.replace("Z", "+00:00"))
+            now = datetime.now(timezone.utc)
+            ago = int((now - dt).total_seconds() / 60)
+            if ago < 60:
+                last_scan_str = f"{ago}m ago"
+            else:
+                last_scan_str = f"{ago // 60}h {ago % 60}m ago"
+        except Exception:
+            last_scan_str = last_scan[:16].replace("T", " ")
+    else:
+        last_scan_str = "never"
+
+    # ── Print ────────────────────────────────────────────────────────────────
+    w = 52
+    print()
+    print("  " + "=" * w)
+    print(f"  {'ARB-BOT STATUS':^{w}}")
+    print("  " + "=" * w)
+    print(f"  {'Bankroll':<24} {'':>4}")
+    print(f"    Starting capital   ${start:>10,.2f}")
+    print(f"    Current capital    ${current:>10,.2f}  ({'+'if pnl>=0 else ''}{pnl_pct:.1f}%)")
+    print(f"    Realised P&L       {'+'if pnl>=0 else ''}${pnl:>9.2f}")
+    print()
+    print(f"  {'Open Positions':<24}")
+    print(f"    Active trades      {open_cnt:>10}")
+    print(f"    Capital deployed   ${deployed:>10.2f}  ({deployed_pct:.1f}% of bankroll)")
+    print(f"    Expected profit    ${exp_open:>10.2f}  (if all open win)")
+    print()
+    print(f"  {'Settled Trades':<24}")
+    print(f"    Total settled      {settled:>10}")
+    print(f"    Won / Lost         {wins:>4} / {losses:<4}"
+          + (f"   ({win_rate:.0f}% win rate)" if settled else ""))
+    print()
+    print(f"  {'History':<24}")
+    print(f"    Sessions run       {sessions:>10}")
+    print(f"    Last scan          {last_scan_str:>10}")
+    print("  " + "=" * w)
+    print()
+
+
 def main():
     parser = argparse.ArgumentParser(description="View paper trades and bankroll")
+    parser.add_argument("--status", action="store_true",
+                        help="Compact dashboard: bankroll, deployed, active trades")
     parser.add_argument("--session", type=str, default=None,
                         help="Session ID to view in detail ('latest' for most recent)")
     parser.add_argument("--all", action="store_true",
@@ -262,7 +357,9 @@ def main():
 
     conn = connect()
 
-    if args.all:
+    if args.status:
+        show_status(conn)
+    elif args.all:
         show_all(conn)
     elif args.session:
         show_trades(conn, args.session)
