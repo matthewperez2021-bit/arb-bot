@@ -50,6 +50,7 @@ from config.settings import (
     ODDS_API_KEY,
     STARTING_CAPITAL_USD,
     MAX_SINGLE_POSITION_USD,
+    MAX_TOTAL_DEPLOYED_USD,
     KELLY_FRACTION,
     MIN_NET_EDGE_PAPER,
     SQLITE_DB_PATH,
@@ -637,14 +638,36 @@ def run_paper_test(capital: float, max_per_trade: float, verbose: bool = False):
     print()
 
     tracker   = SportsPaperTracker()
+
+    # ── Cross-session capital guard ──────────────────────────────────────────
+    # Sum all stakes that are still open across every past session so we never
+    # breach MAX_TOTAL_DEPLOYED_USD regardless of how many scans have run.
+    already_deployed = tracker.conn.execute(
+        "SELECT COALESCE(SUM(total_stake), 0) FROM sports_paper_trades "
+        "WHERE outcome='open' OR outcome IS NULL"
+    ).fetchone()[0] or 0.0
+
+    session_budget = max(0.0, MAX_TOTAL_DEPLOYED_USD - already_deployed)
+
+    print(f"    Already deployed (open positions): ${already_deployed:,.2f}")
+    print(f"    Hard cap (MAX_TOTAL_DEPLOYED_USD):  ${MAX_TOTAL_DEPLOYED_USD:,.2f}")
+    print(f"    Budget available this session:      ${session_budget:,.2f}")
+    print()
+
+    if session_budget < 1.0:
+        print("    Capital fully deployed — no new trades until open positions settle.")
+        print(f"    Run resolve_trades.py to check for settlements.")
+        tracker.close()
+        return
+
     trades: List[PaperTrade] = []
     deployed  = 0.0
-    remaining = capital
+    remaining = min(capital, session_budget)   # can't spend more than budget allows
 
     for i, opp in enumerate(opportunities, 1):
-        # Skip if we've used > 80% of capital
-        if deployed >= capital * 0.80:
-            print(f"    Capital limit reached (${deployed:.2f} deployed). Stopping.")
+        # Stop when this session has hit its share of the global cap
+        if deployed >= session_budget:
+            print(f"    Session budget reached (${deployed:.2f} deployed this scan). Stopping.")
             break
 
         # For YES trades win prob = fair_prob; for NO trades it's (1 - fair_prob)
