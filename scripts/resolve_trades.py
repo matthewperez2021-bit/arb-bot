@@ -39,10 +39,11 @@ log = logging.getLogger("resolve_trades")
 
 MIGRATION_SQL = """
 -- Resolution columns (added if not present)
-ALTER TABLE sports_paper_trades ADD COLUMN outcome       TEXT    DEFAULT 'open';
-ALTER TABLE sports_paper_trades ADD COLUMN actual_profit REAL    DEFAULT NULL;
-ALTER TABLE sports_paper_trades ADD COLUMN resolved_at   TEXT    DEFAULT NULL;
-ALTER TABLE sports_paper_trades ADD COLUMN bankroll_after REAL   DEFAULT NULL;
+ALTER TABLE sports_paper_trades ADD COLUMN outcome          TEXT DEFAULT 'open';
+ALTER TABLE sports_paper_trades ADD COLUMN actual_profit    REAL DEFAULT NULL;
+ALTER TABLE sports_paper_trades ADD COLUMN resolved_at      TEXT DEFAULT NULL;
+ALTER TABLE sports_paper_trades ADD COLUMN bankroll_after   REAL DEFAULT NULL;
+ALTER TABLE sports_paper_trades ADD COLUMN strategy_version TEXT DEFAULT 'v1';
 
 -- Bankroll tracker (one row, updated in place)
 CREATE TABLE IF NOT EXISTS bankroll (

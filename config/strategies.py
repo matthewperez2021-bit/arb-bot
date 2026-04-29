@@ -1,0 +1,86 @@
+"""
+strategies.py — Versioned strategy registry for the arb bot.
+
+Each Strategy bundles all tunable parameters that affect which opportunities
+get traded and how they're sized. Versions are append-only — never edit a
+past version, only add new ones. The registry itself is the changelog.
+
+To switch strategies: change ACTIVE_STRATEGY at the bottom of this file.
+To run two side-by-side: pass --strategies v1,v2 to sports_paper_test.py.
+"""
+
+from dataclasses import dataclass, field, asdict
+from typing import FrozenSet, Dict
+
+
+@dataclass(frozen=True)
+class Strategy:
+    """Immutable bundle of tunable parameters for one strategy version."""
+    name: str                                # "v1", "v2", ...
+    created_at: str                          # ISO date "2026-04-29"
+    notes: str                               # one-line description of the change
+
+    # ── Edge / sizing ────────────────────────────────────────────────────────
+    min_net_edge: float                      # e.g. 0.015 = 1.5% min net edge to trade
+    max_per_trade_usd: float                 # max $ per single trade
+    max_total_deployed_usd: float            # max $ across all open positions
+    kelly_fraction: float                    # 0.5 = half-Kelly
+
+    # ── Quality filters ──────────────────────────────────────────────────────
+    min_books: int                           # min sportsbooks needed for fair_prob
+    max_legs: int                            # max parlay legs (99 = no cap)
+    max_trusted_edge_pct: float              # discard "too good to be true" (100 = no cap)
+    excluded_sports: FrozenSet[str]          # e.g. frozenset({"basketball_nba"})
+    allowed_sides: FrozenSet[str]            # {"yes","no"} or {"no"} only
+
+    def as_dict(self) -> dict:
+        """Serialize for logging or display. frozensets become sorted lists."""
+        d = asdict(self)
+        d["excluded_sports"] = sorted(self.excluded_sports)
+        d["allowed_sides"]   = sorted(self.allowed_sides)
+        return d
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REGISTRY — append-only. Never edit or remove past versions.
+# ─────────────────────────────────────────────────────────────────────────────
+
+STRATEGIES: Dict[str, Strategy] = {
+    "v1": Strategy(
+        name="v1",
+        created_at="2026-04-28",
+        notes=(
+            "Baseline: original settings with no sport/leg/edge filters. "
+            "First 59 settled trades produced 20% win rate, +$249 P&L, +15.6% ROI."
+        ),
+        min_net_edge=0.015,
+        max_per_trade_usd=50.0,
+        max_total_deployed_usd=2000.0,
+        kelly_fraction=0.5,
+        min_books=2,
+        max_legs=99,
+        max_trusted_edge_pct=100.0,
+        excluded_sports=frozenset(),
+        allowed_sides=frozenset({"yes", "no"}),
+    ),
+    # ── Add v2, v3, ... here. Do NOT edit v1. ─────────────────────────────────
+}
+
+
+# Single source of truth for which strategy the scheduler / paper test runs.
+# Override on the command line with --strategy <name>.
+ACTIVE_STRATEGY: str = "v1"
+
+
+def get(name: str | None = None) -> Strategy:
+    """Look up a strategy by name. None → ACTIVE_STRATEGY."""
+    key = name or ACTIVE_STRATEGY
+    if key not in STRATEGIES:
+        available = ", ".join(STRATEGIES.keys())
+        raise KeyError(f"Unknown strategy '{key}'. Available: {available}")
+    return STRATEGIES[key]
+
+
+def all_versions() -> list:
+    """Return every registered Strategy in insertion order."""
+    return list(STRATEGIES.values())

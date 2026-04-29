@@ -16,6 +16,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config.settings import SQLITE_DB_PATH, STARTING_CAPITAL_USD
+from config.strategies import STRATEGIES, ACTIVE_STRATEGY
 
 
 def connect():
@@ -24,12 +25,13 @@ def connect():
         sys.exit(1)
     conn = sqlite3.connect(SQLITE_DB_PATH)
     conn.row_factory = sqlite3.Row
-    # Make sure resolution columns exist (in case resolve_trades hasn't been run yet)
+    # Make sure resolution + versioning columns exist (idempotent)
     for col in [
         "ALTER TABLE sports_paper_trades ADD COLUMN outcome TEXT DEFAULT 'open'",
         "ALTER TABLE sports_paper_trades ADD COLUMN actual_profit REAL DEFAULT NULL",
         "ALTER TABLE sports_paper_trades ADD COLUMN resolved_at TEXT DEFAULT NULL",
         "ALTER TABLE sports_paper_trades ADD COLUMN bankroll_after REAL DEFAULT NULL",
+        "ALTER TABLE sports_paper_trades ADD COLUMN strategy_version TEXT DEFAULT 'v1'",
     ]:
         try:
             conn.execute(col)
@@ -317,12 +319,26 @@ def show_status(conn):
     else:
         last_scan_str = "never"
 
+    # ── Per-version open-position breakdown ──────────────────────────────────
+    by_version = conn.execute(
+        "SELECT strategy_version, COUNT(*) AS cnt, "
+        "       COALESCE(SUM(total_stake), 0) AS dep "
+        "FROM sports_paper_trades "
+        "WHERE outcome='open' OR outcome IS NULL "
+        "GROUP BY strategy_version ORDER BY strategy_version"
+    ).fetchall()
+
     # ── Print ────────────────────────────────────────────────────────────────
     w = 52
     print()
     print("  " + "=" * w)
     print(f"  {'ARB-BOT STATUS':^{w}}")
     print("  " + "=" * w)
+    print(f"  Active strategy:   {ACTIVE_STRATEGY}")
+    if ACTIVE_STRATEGY in STRATEGIES:
+        notes = STRATEGIES[ACTIVE_STRATEGY].notes
+        print(f"  ({notes[:48]}{'...' if len(notes) > 48 else ''})")
+    print()
     print(f"  {'Bankroll':<24} {'':>4}")
     print(f"    Starting capital   ${start:>10,.2f}")
     print(f"    Current capital    ${current:>10,.2f}  ({'+'if pnl>=0 else ''}{pnl_pct:.1f}%)")
@@ -341,7 +357,93 @@ def show_status(conn):
     print(f"  {'History':<24}")
     print(f"    Sessions run       {sessions:>10}")
     print(f"    Last scan          {last_scan_str:>10}")
+    if by_version and len(by_version) > 0:
+        print()
+        print(f"  {'Open positions by strategy':<28}")
+        for r in by_version:
+            v = r["strategy_version"] or "?"
+            print(f"    {v:<8}           {r['cnt']:>4} trades  ${r['dep']:>8.2f}")
     print("  " + "=" * w)
+    print()
+
+
+def show_strategies(conn):
+    """Print the strategy version log: registered versions + live performance."""
+    # Aggregate stats per version
+    rows = conn.execute("""
+        SELECT strategy_version,
+               COUNT(*)                                          AS n,
+               SUM(CASE WHEN outcome='won'  THEN 1 ELSE 0 END)  AS w,
+               SUM(CASE WHEN outcome='lost' THEN 1 ELSE 0 END)  AS l,
+               SUM(CASE WHEN outcome IN ('won','lost')
+                        THEN total_stake ELSE 0 END)             AS settled_stake,
+               COALESCE(SUM(actual_profit), 0)                   AS pnl,
+               SUM(CASE WHEN outcome='open' OR outcome IS NULL
+                        THEN 1 ELSE 0 END)                       AS open_cnt
+        FROM sports_paper_trades
+        GROUP BY strategy_version
+    """).fetchall()
+    by_version = {r["strategy_version"]: dict(r) for r in rows}
+
+    print()
+    print("  " + "=" * 90)
+    print(f"  {'STRATEGY VERSION LOG':^90}")
+    print("  " + "=" * 90)
+    print(f"  {'Ver':<4} {'Created':<11} {'Status':<8} {'N':>4} "
+          f"{'W/L':<8} {'Open':>4} {'P&L':>10} {'ROI':>7}  Notes")
+    print("  " + "-" * 90)
+
+    # Iterate registry order (so future v2,v3 appear in order),
+    # then any DB-only versions not in registry at the end.
+    seen = set()
+    for name, strat in STRATEGIES.items():
+        seen.add(name)
+        d = by_version.get(name, {})
+        n   = d.get("n", 0) or 0
+        w   = d.get("w", 0) or 0
+        l   = d.get("l", 0) or 0
+        op  = d.get("open_cnt", 0) or 0
+        pnl = d.get("pnl", 0) or 0
+        sts = d.get("settled_stake", 0) or 0
+        roi = (pnl / sts * 100) if sts else 0
+        status = "ACTIVE" if name == ACTIVE_STRATEGY else ("PAST" if n else "DEFINED")
+        wl_str = f"{w}/{l}" if (w + l) else "—"
+        roi_str = f"{roi:+.1f}%" if sts else "—"
+        pnl_str = f"${pnl:+.2f}" if (w + l) else "—"
+        print(f"  {name:<4} {strat.created_at:<11} {status:<8} {n:>4} "
+              f"{wl_str:<8} {op:>4} {pnl_str:>10} {roi_str:>7}  {strat.notes[:40]}")
+
+    # Any versions in DB but not in registry (orphans)
+    for name, d in by_version.items():
+        if name in seen or not name:
+            continue
+        n  = d["n"]; w = d["w"] or 0; l = d["l"] or 0; op = d["open_cnt"] or 0
+        pnl = d["pnl"] or 0; sts = d["settled_stake"] or 0
+        roi = (pnl / sts * 100) if sts else 0
+        wl_str = f"{w}/{l}" if (w + l) else "—"
+        print(f"  {name:<4} {'(orphan)':<11} {'?':<8} {n:>4} "
+              f"{wl_str:<8} {op:>4} ${pnl:+9.2f} {roi:>+6.1f}%  (not in registry)")
+
+    print("  " + "=" * 90)
+
+    # Detailed parameter dump
+    print()
+    print("  -- Strategy Parameters " + "-" * 70)
+    for name, strat in STRATEGIES.items():
+        marker = " (ACTIVE)" if name == ACTIVE_STRATEGY else ""
+        print(f"\n  {name}{marker}  [{strat.created_at}]")
+        print(f"    {strat.notes}")
+        print(f"    min_net_edge          = {strat.min_net_edge:.1%}")
+        print(f"    max_per_trade_usd     = ${strat.max_per_trade_usd:,.0f}")
+        print(f"    max_total_deployed    = ${strat.max_total_deployed_usd:,.0f}")
+        print(f"    kelly_fraction        = {strat.kelly_fraction}")
+        print(f"    min_books             = {strat.min_books}")
+        print(f"    max_legs              = {strat.max_legs}")
+        print(f"    max_trusted_edge_pct  = {strat.max_trusted_edge_pct:g}%")
+        excl = ", ".join(sorted(strat.excluded_sports)) or "(none)"
+        print(f"    excluded_sports       = {excl}")
+        sides = ", ".join(sorted(strat.allowed_sides))
+        print(f"    allowed_sides         = {sides}")
     print()
 
 
@@ -349,6 +451,9 @@ def main():
     parser = argparse.ArgumentParser(description="View paper trades and bankroll")
     parser.add_argument("--status", action="store_true",
                         help="Compact dashboard: bankroll, deployed, active trades")
+    parser.add_argument("--strategies", action="store_true",
+                        help="Show the strategy version log (registered "
+                             "versions + live performance)")
     parser.add_argument("--session", type=str, default=None,
                         help="Session ID to view in detail ('latest' for most recent)")
     parser.add_argument("--all", action="store_true",
@@ -359,6 +464,8 @@ def main():
 
     if args.status:
         show_status(conn)
+    elif args.strategies:
+        show_strategies(conn)
     elif args.all:
         show_all(conn)
     elif args.session:

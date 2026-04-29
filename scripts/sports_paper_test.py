@@ -49,12 +49,9 @@ from config.settings import (
     ODDS_API_ACTIVE_SPORTS,
     ODDS_API_KEY,
     STARTING_CAPITAL_USD,
-    MAX_SINGLE_POSITION_USD,
-    MAX_TOTAL_DEPLOYED_USD,
-    KELLY_FRACTION,
-    MIN_NET_EDGE_PAPER,
     SQLITE_DB_PATH,
 )
+from config.strategies import Strategy, get as get_strategy, ACTIVE_STRATEGY
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Logging (compact, sports-focused)
@@ -97,9 +94,11 @@ CREATE TABLE IF NOT EXISTS sports_paper_trades (
     legs_priced     INTEGER,
     legs_total      INTEGER,
     sport           TEXT,
-    session_id      TEXT
+    session_id      TEXT,
+    strategy_version TEXT DEFAULT 'v1'      -- which Strategy produced this trade
 );
 CREATE INDEX IF NOT EXISTS idx_sports_session ON sports_paper_trades(session_id);
+CREATE INDEX IF NOT EXISTS idx_sports_strategy ON sports_paper_trades(strategy_version);
 """
 
 
@@ -112,6 +111,19 @@ class SportsPaperTracker:
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SPORTS_SCHEMA)
         self.conn.execute("PRAGMA journal_mode=WAL")
+        # Idempotent migration: add strategy_version column on existing DBs.
+        try:
+            self.conn.execute(
+                "ALTER TABLE sports_paper_trades "
+                "ADD COLUMN strategy_version TEXT DEFAULT 'v1'"
+            )
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        # Backfill any NULLs from earlier rows
+        self.conn.execute(
+            "UPDATE sports_paper_trades SET strategy_version='v1' "
+            "WHERE strategy_version IS NULL"
+        )
         self.conn.commit()
 
     def log_trade(self, trade: dict) -> int:
@@ -122,8 +134,8 @@ class SportsPaperTracker:
                 fair_prob, net_edge, net_edge_pct,
                 contracts, total_stake, expected_profit,
                 kelly_fraction, books_used, legs_priced, legs_total,
-                sport, session_id
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                sport, session_id, strategy_version
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             trade["opened_at"], "paper",
             trade["kalshi_ticker"], trade.get("kalshi_title"),
@@ -133,6 +145,7 @@ class SportsPaperTracker:
             trade.get("kelly_fraction"), trade.get("books_used"),
             trade.get("legs_priced"), trade.get("legs_total"),
             trade.get("sport"), trade.get("session_id"),
+            trade.get("strategy_version", "v1"),
         ))
         self.conn.commit()
         return cur.lastrowid
@@ -157,7 +170,7 @@ def kelly_contracts(
     kalshi_ask: float,
     bankroll: float,
     max_stake_usd: float,
-    kelly_fraction: float = KELLY_FRACTION,
+    kelly_fraction: float = 0.5,
 ) -> tuple:
     """
     Half-Kelly position size for a binary prediction market bet.
@@ -303,20 +316,42 @@ def print_trade_card(trade: "PaperTrade", opp: "OddsArbOpportunity"):
     print()
 
 
-def run_paper_test(capital: float, max_per_trade: float, verbose: bool = False):
+def run_paper_test(
+    capital: float,
+    strategy: Strategy,
+    verbose: bool = False,
+    shared_data: dict = None,
+):
     """
-    Execute the full sports paper test pipeline.
-    Prints results to stdout.
+    Execute the full sports paper test pipeline for ONE strategy version.
+
+    Args:
+        capital:     Bankroll for this run. May be a fraction of total when
+                     in A/B mode (caller splits the bankroll).
+        strategy:    The Strategy version controlling filters / sizing / cap.
+        verbose:     Forward to logging level.
+        shared_data: Reserved for future A/B optimization (currently ignored;
+                     each pass fetches fresh data).
+
+    Returns:
+        None.
     """
-    session_id = f"sports_{int(time.time())}"
+    max_per_trade = strategy.max_per_trade_usd
+    session_id = f"sports_{int(time.time())}_{strategy.name}"
     now_str    = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     print()
     print("  +" + "=" * 64 + "+")
     print(f"  |  SPORTS ARB PAPER TEST  -  {now_str:<35}|")
-    print(f"  |  Bankroll: ${capital:,.2f}  -  Max/Trade: ${max_per_trade:.0f}  -  MODE: PAPER{' ' * 12}|")
+    print(f"  |  STRATEGY: {strategy.name:<6}  Bankroll: ${capital:,.2f}  Max/Trade: ${max_per_trade:.0f}  MODE: PAPER  |")
+    print(f"  |  {strategy.notes[:60]:<62}|")
     print("  +" + "=" * 64 + "+")
     print()
+
+    # NOTE: A/B mode currently re-fetches data per pass. The shared_data
+    # parameter is reserved for a future optimization that reuses Odds API
+    # results across passes; for now each strategy pass pulls fresh markets.
+    _ = shared_data  # keep signature stable
 
     # ── Step 1: Fetch KXMVE markets from Kalshi ──────────────────────────────
     print(_bar("STEP 1  Kalshi KXMVE sports markets"))
@@ -354,7 +389,7 @@ def run_paper_test(capital: float, max_per_trade: float, verbose: bool = False):
         return
 
     try:
-        scanner = OddsArbScanner(min_edge=MIN_NET_EDGE_PAPER)
+        scanner = OddsArbScanner(min_edge=strategy.min_net_edge)
         events  = scanner.fetch_events(ODDS_API_ACTIVE_SPORTS)
         elapsed = time.perf_counter() - t0
 
@@ -485,12 +520,12 @@ def run_paper_test(capital: float, max_per_trade: float, verbose: bool = False):
     print(f"    Markets skipped (have totals): {len(kxmve_markets) - len(scannable_markets):,}")
     print()
 
-    # ── Step 4: Scan for mispricings (paper mode — min_books=2) ──────────────
-    print(_bar("STEP 4  Scanning for mispriced Kalshi markets"))
+    # ── Step 4: Scan for mispricings (per-strategy min_books) ────────────────
+    print(_bar(f"STEP 4  Scanning for mispriced Kalshi markets  (min_books={strategy.min_books})"))
     t0 = time.perf_counter()
 
-    # Paper mode: lower min_books to 2 (live would require 3)
-    scanner.min_books = 2
+    scanner.min_books = strategy.min_books
+    scanner.min_edge  = strategy.min_net_edge
 
     # Lookup for close_time by ticker (used in trade cards)
     market_lookup = {km.market_id: km for km in scannable_markets}
@@ -519,7 +554,7 @@ def run_paper_test(capital: float, max_per_trade: float, verbose: bool = False):
         )
         elapsed = time.perf_counter() - t0
         print(f"    Scanned {len(scannable_markets):,} markets in {elapsed:.1f}s "
-              f"-> {len(opportunities)} opportunities (min_edge={MIN_NET_EDGE_PAPER:.1%}, min_books=2)")
+              f"-> {len(opportunities)} opportunities (min_edge={strategy.min_net_edge:.1%}, min_books=2)")
     except Exception as e:
         print(f"    ERROR: scan failed — {e}")
         return
@@ -529,7 +564,7 @@ def run_paper_test(capital: float, max_per_trade: float, verbose: bool = False):
     # ── Step 5: Display opportunities ─────────────────────────────────────────
     if not opportunities:
         print(_bar("RESULTS"))
-        print(f"    No opportunities above {MIN_NET_EDGE_PAPER:.1%} net edge threshold.")
+        print(f"    No opportunities above {strategy.min_net_edge:.1%} net edge threshold.")
         print()
         if matched_leg_count == 0:
             print("    ROOT CAUSE: 0 KXMVE legs matched sportsbook events.")
@@ -545,7 +580,7 @@ def run_paper_test(capital: float, max_per_trade: float, verbose: bool = False):
         print("    Tips:")
         print("    - Try during peak sports days: NBA/NHL playoff nights, full MLB slate")
         print("    - Check logs for near-miss details: data/sports_paper_test.log")
-        print("    - Lower MIN_NET_EDGE_PAPER in config/settings.py if you want more trades")
+        print(f"    - Lower min_net_edge in current strategy ({strategy.name}) if you want more trades")
         print()
 
         # Near-miss scan: run with min_edge=0 to show best sub-threshold opportunities
@@ -566,7 +601,7 @@ def run_paper_test(capital: float, max_per_trade: float, verbose: bool = False):
                 print(hdr2)
                 print("  " + "-" * (len(hdr2) - 2))
                 for i, opp in enumerate(top, 1):
-                    gap = (opp.net_edge - MIN_NET_EDGE_PAPER) * 100
+                    gap = (opp.net_edge - strategy.min_net_edge) * 100
                     print(
                         f"  {i:>2}  {opp.kalshi_ticker:<22}  {opp.kalshi_side.upper():<4}  "
                         f"{opp.kalshi_price:>5.3f}  {opp.fair_prob:>5.3f}  "
@@ -576,10 +611,10 @@ def run_paper_test(capital: float, max_per_trade: float, verbose: bool = False):
                 max_edge = near_misses_all[0].net_edge
                 print()
                 print(f"    Total matchable markets: {len(near_misses_all)}")
-                print(f"    Best net edge today:     {max_edge*100:.2f}%  (need {MIN_NET_EDGE_PAPER*100:.1f}%)")
+                print(f"    Best net edge today:     {max_edge*100:.2f}%  (need {strategy.min_net_edge*100:.1f}%)")
                 print(f"    Average net edge:        {avg_edge*100:.2f}%")
                 print()
-                if max_edge >= MIN_NET_EDGE_PAPER * 0.5:
+                if max_edge >= strategy.min_net_edge * 0.5:
                     print("    ASSESSMENT: Near-threshold markets exist. Try again in a few hours")
                     print("    when odds shift — lines move as game time approaches.")
                 else:
@@ -634,23 +669,24 @@ def run_paper_test(capital: float, max_per_trade: float, verbose: bool = False):
     opportunities = full_opps
 
     # ── Step 6: Kelly-size and simulate paper trades ──────────────────────────
-    print(_bar("PAPER TRADES  (Half-Kelly sizing, $1,000 bankroll)"))
+    kelly_label = f"{int(strategy.kelly_fraction*100)}%-Kelly"
+    print(_bar(f"PAPER TRADES  ({kelly_label} sizing, ${capital:,.0f} bankroll)"))
     print()
 
     tracker   = SportsPaperTracker()
 
     # ── Cross-session capital guard ──────────────────────────────────────────
     # Sum all stakes that are still open across every past session so we never
-    # breach MAX_TOTAL_DEPLOYED_USD regardless of how many scans have run.
+    # breach the strategy's max_total_deployed_usd regardless of scan count.
     already_deployed = tracker.conn.execute(
         "SELECT COALESCE(SUM(total_stake), 0) FROM sports_paper_trades "
         "WHERE outcome='open' OR outcome IS NULL"
     ).fetchone()[0] or 0.0
 
-    session_budget = max(0.0, MAX_TOTAL_DEPLOYED_USD - already_deployed)
+    session_budget = max(0.0, strategy.max_total_deployed_usd - already_deployed)
 
     print(f"    Already deployed (open positions): ${already_deployed:,.2f}")
-    print(f"    Hard cap (MAX_TOTAL_DEPLOYED_USD):  ${MAX_TOTAL_DEPLOYED_USD:,.2f}")
+    print(f"    Hard cap (strategy {strategy.name}):       ${strategy.max_total_deployed_usd:,.2f}")
     print(f"    Budget available this session:      ${session_budget:,.2f}")
     print()
 
@@ -664,11 +700,28 @@ def run_paper_test(capital: float, max_per_trade: float, verbose: bool = False):
     deployed  = 0.0
     remaining = min(capital, session_budget)   # can't spend more than budget allows
 
+    # ── Strategy-level filter counters (for the report) ──────────────────────
+    skipped = {"sport": 0, "legs": 0, "edge_too_high": 0, "side": 0}
+
     for i, opp in enumerate(opportunities, 1):
         # Stop when this session has hit its share of the global cap
         if deployed >= session_budget:
             print(f"    Session budget reached (${deployed:.2f} deployed this scan). Stopping.")
             break
+
+        # ── Strategy filters ─────────────────────────────────────────────────
+        if opp.sport in strategy.excluded_sports:
+            skipped["sport"] += 1
+            continue
+        if (opp.legs_total or 0) > strategy.max_legs:
+            skipped["legs"] += 1
+            continue
+        if (opp.net_edge * 100) > strategy.max_trusted_edge_pct:
+            skipped["edge_too_high"] += 1
+            continue
+        if opp.kalshi_side not in strategy.allowed_sides:
+            skipped["side"] += 1
+            continue
 
         # For YES trades win prob = fair_prob; for NO trades it's (1 - fair_prob)
         win_prob = opp.fair_prob if opp.kalshi_side == "yes" else (1.0 - opp.fair_prob)
@@ -677,6 +730,7 @@ def run_paper_test(capital: float, max_per_trade: float, verbose: bool = False):
             kalshi_ask=opp.kalshi_price,
             bankroll=remaining,
             max_stake_usd=max_per_trade,
+            kelly_fraction=strategy.kelly_fraction,
         )
         if contracts < 1:
             continue
@@ -730,11 +784,21 @@ def run_paper_test(capital: float, max_per_trade: float, verbose: bool = False):
             "legs_total":     opp.legs_total,
             "sport":          opp.sport,
             "session_id":     session_id,
+            "strategy_version": strategy.name,
         })
 
+    # Print strategy-filter skip summary
+    total_skipped = sum(skipped.values())
+    if total_skipped:
+        print(f"    Strategy filters dropped {total_skipped} opportunities  "
+              f"(sport={skipped['sport']}, legs={skipped['legs']}, "
+              f"edge>{strategy.max_trusted_edge_pct:g}%={skipped['edge_too_high']}, "
+              f"side={skipped['side']})")
+        print()
+
     if not trades:
-        print("    No trades passed Kelly sizing filters.")
-        print("    (Possible cause: fair_prob too close to ask → Kelly fraction < 1 contract)")
+        print("    No trades passed Kelly sizing / strategy filters.")
+        print("    (Possible causes: fair_prob too close to ask, or strategy filters too strict)")
         tracker.close()
         return
 
@@ -830,7 +894,8 @@ def run_paper_test(capital: float, max_per_trade: float, verbose: bool = False):
     print("    Slippage:    Book walker check skipped in paper mode; add in live mode")
     print()
     print(f"    All {len(trades)} trades logged to SQLite: {SQLITE_DB_PATH}")
-    print(f"    Session ID: {session_id}")
+    print(f"    Session ID:        {session_id}")
+    print(f"    Strategy version:  {strategy.name}  ({strategy.notes[:50]})")
     print()
     print("  " + "=" * 64)
     print()
@@ -846,21 +911,58 @@ def main():
     parser = argparse.ArgumentParser(
         description="Sports arb paper test — Kalshi KXMVE vs sportsbook consensus"
     )
-    parser.add_argument("--capital",       type=float, default=STARTING_CAPITAL_USD,
+    parser.add_argument("--capital",    type=float, default=STARTING_CAPITAL_USD,
                         help=f"Starting bankroll (default: ${STARTING_CAPITAL_USD:.0f})")
-    parser.add_argument("--max-per-trade", type=float, default=MAX_SINGLE_POSITION_USD,
-                        help=f"Max USD per trade (default: ${MAX_SINGLE_POSITION_USD:.0f})")
-    parser.add_argument("--verbose",       action="store_true",
+    parser.add_argument("--strategy",   type=str, default=None,
+                        help="Strategy version to run (e.g. v1). "
+                             "Overrides ACTIVE_STRATEGY in config/strategies.py.")
+    parser.add_argument("--strategies", type=str, default=None,
+                        help="A/B mode: comma-separated list, e.g. 'v1,v2'. "
+                             "Each strategy gets capital / N as its bankroll.")
+    parser.add_argument("--verbose",    action="store_true",
                         help="Show DEBUG logs")
     args = parser.parse_args()
 
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
+    # ── A/B mode: run multiple strategies serially with split capital ────────
+    if args.strategies:
+        names = [n.strip() for n in args.strategies.split(",") if n.strip()]
+        if len(names) < 2:
+            print("  --strategies needs 2+ comma-separated names. "
+                  "Use --strategy for single mode.")
+            sys.exit(1)
+        try:
+            strategies = [get_strategy(n) for n in names]
+        except KeyError as e:
+            print(f"  {e}")
+            sys.exit(1)
+
+        per_strategy_capital = args.capital / len(strategies)
+        print(f"\n  [A/B MODE]  {len(strategies)} strategies, "
+              f"${per_strategy_capital:,.2f} bankroll each "
+              f"(total ${args.capital:,.2f})\n")
+
+        for s in strategies:
+            run_paper_test(
+                capital  = per_strategy_capital,
+                strategy = s,
+                verbose  = args.verbose,
+            )
+        return
+
+    # ── Single-strategy mode ────────────────────────────────────────────────
+    try:
+        strategy = get_strategy(args.strategy)   # None → ACTIVE_STRATEGY
+    except KeyError as e:
+        print(f"  {e}")
+        sys.exit(1)
+
     run_paper_test(
-        capital       = args.capital,
-        max_per_trade = args.max_per_trade,
-        verbose       = args.verbose,
+        capital  = args.capital,
+        strategy = strategy,
+        verbose  = args.verbose,
     )
 
 

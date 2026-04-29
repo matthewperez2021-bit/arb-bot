@@ -130,9 +130,12 @@ DATE_TOLERANCE_DAYS         = 3     # +/- days for close date compatibility chec
 # ─────────────────────────────────────────────────────────────────────
 STARTING_CAPITAL_USD        = 2000.0    # Starting bankroll — update as you scale
 
-# Phase 4 initial limits (conservative)
-MAX_SINGLE_POSITION_USD     = 50.0      # Max $ per single arb trade
-MAX_TOTAL_DEPLOYED_USD      = 2000.0    # Max $ across ALL open positions at any time (hard cap)
+# ── DEPRECATED: tunables below are now per-strategy in config/strategies.py ──
+# Kept here for backwards compatibility / non-paper-test scripts.
+# To change paper-test behavior, add a new strategy version and switch
+# ACTIVE_STRATEGY in config/strategies.py.
+MAX_SINGLE_POSITION_USD     = 50.0      # Max $ per single arb trade  (use Strategy.max_per_trade_usd)
+MAX_TOTAL_DEPLOYED_USD      = 2000.0    # Max $ across ALL open positions  (use Strategy.max_total_deployed_usd)
 MAX_NAKED_CONTRACTS         = 3         # Max unhedged contracts before forced close
 NAKED_EXPOSURE_TIMEOUT_SECS = 60        # Auto-close naked leg after this many seconds
 KELLY_FRACTION              = 0.5       # Half-Kelly sizing
