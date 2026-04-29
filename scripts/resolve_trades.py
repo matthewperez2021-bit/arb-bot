@@ -239,7 +239,119 @@ def resolve_all(dry_run: bool = False, verbose: bool = False):
 
     print()
     _print_bankroll(conn)
+    _show_all_sessions(conn)
     conn.close()
+
+
+def _outcome_icon(outcome):
+    if outcome == "won":   return "[WIN ]"
+    if outcome == "lost":  return "[LOSS]"
+    return "[open]"
+
+
+def _show_all_sessions(conn: sqlite3.Connection):
+    """Print per-session table + detail for every session that has activity."""
+    rows = conn.execute("""
+        SELECT session_id,
+               COUNT(*)                                         AS trades,
+               SUM(CASE WHEN outcome='won'  THEN 1 ELSE 0 END) AS wins,
+               SUM(CASE WHEN outcome='lost' THEN 1 ELSE 0 END) AS losses,
+               SUM(CASE WHEN outcome NOT IN ('won','lost') THEN 1 ELSE 0 END) AS open_count,
+               MIN(opened_at)                                   AS opened,
+               SUM(total_stake)                                 AS deployed,
+               SUM(expected_profit)                             AS exp_profit,
+               COALESCE(SUM(actual_profit), 0)                  AS actual_profit,
+               AVG(net_edge_pct)                                AS avg_edge
+        FROM sports_paper_trades
+        GROUP BY session_id
+        ORDER BY opened DESC
+    """).fetchall()
+
+    if not rows:
+        return
+
+    print(f"  -- All Sessions ----------------------------------------------")
+    print(f"  {'Session ID':<28} {'Tr':>3} {'W':>3} {'L':>3} {'Op':>3}  "
+          f"{'Deployed':>9}  {'ExpProfit':>9}  {'ActProfit':>9}  {'AvgEdge':>7}  Date")
+    print("  " + "-" * 100)
+    for r in rows:
+        act = r['actual_profit'] or 0
+        act_str = f"${act:>+8.2f}" if (r['wins'] + r['losses']) > 0 else "  pending"
+        print(
+            f"  {r['session_id']:<28} {r['trades']:>3} {r['wins']:>3} {r['losses']:>3} "
+            f"{r['open_count']:>3}  ${r['deployed']:>8.2f}  "
+            f"${r['exp_profit']:>8.2f}  {act_str}  "
+            f"{r['avg_edge']:>6.1f}%  {r['opened'][:16].replace('T',' ')}"
+        )
+
+    total_trades  = sum(r['trades']                  for r in rows)
+    total_wins    = sum(r['wins']                    for r in rows)
+    total_losses  = sum(r['losses']                  for r in rows)
+    total_open    = sum(r['open_count']              for r in rows)
+    total_actual  = sum((r['actual_profit'] or 0)    for r in rows)
+    win_rate      = total_wins / (total_wins+total_losses) * 100 if (total_wins+total_losses) else 0
+    print()
+    print(f"  Totals: {total_trades} trades  |  {total_wins}W {total_losses}L {total_open} open"
+          + (f"  |  {win_rate:.0f}% win rate" if (total_wins+total_losses) else "")
+          + f"  |  Actual P&L: ${total_actual:+.2f}")
+    print()
+
+    # Per-session trade detail
+    for r in rows:
+        _show_session_detail(conn, r['session_id'])
+
+
+def _show_session_detail(conn: sqlite3.Connection, session_id: str):
+    trades = conn.execute(
+        "SELECT * FROM sports_paper_trades WHERE session_id=? ORDER BY id",
+        (session_id,)
+    ).fetchall()
+    if not trades:
+        return
+
+    wins   = sum(1 for t in trades if t["outcome"] == "won")
+    losses = sum(1 for t in trades if t["outcome"] == "lost")
+    open_c = sum(1 for t in trades if t["outcome"] not in ("won", "lost"))
+
+    print(f"  -- Session: {session_id}  "
+          f"({len(trades)} trades  {wins}W / {losses}L / {open_c} open) --")
+
+    hdr = (f"  {'#':>2}  {'Status':<6}  {'Opened':<16}  {'Closed':<16}  {'Side':3}  "
+           f"{'Edge':>5}  {'Stake':>7}  {'ExpProfit':>9}  {'ActProfit':>9}  Sport")
+    print(hdr)
+    print("  " + "-" * (len(hdr) - 2))
+
+    for t in trades:
+        status  = _outcome_icon(t["outcome"])
+        act     = t["actual_profit"]
+        act_str = f"${act:>+8.2f}" if act is not None else "   pending"
+        opened  = (t["opened_at"]   or "")[:16].replace("T", " ")
+        closed  = (t["resolved_at"] or "")[:16].replace("T", " ") or "open          "
+        print(
+            f"  {t['id']:>2}  {status}  {opened:<16}  {closed:<16}  "
+            f"{t['kalshi_side'].upper():<3}  {t['net_edge_pct']:>4.1f}%  "
+            f"${t['total_stake']:>6.2f}  ${t['expected_profit']:>8.2f}  "
+            f"{act_str}  {t['sport'] or ''}"
+        )
+
+    total_stake  = sum(t['total_stake']     for t in trades)
+    total_exp    = sum(t['expected_profit'] for t in trades)
+    total_actual = sum(t['actual_profit'] or 0 for t in trades if t['actual_profit'] is not None)
+    settled      = wins + losses
+    print()
+    print(f"  Deployed: ${total_stake:.2f}  |  Exp profit: ${total_exp:.2f}"
+          + (f"  |  Actual P&L: ${total_actual:+.2f}  ({settled} settled)" if settled else ""))
+
+    print()
+    print("  Titles:")
+    for t in trades:
+        status  = _outcome_icon(t["outcome"])
+        title   = t['kalshi_title'] or t['kalshi_ticker']
+        opened  = (t["opened_at"]   or "")[:16].replace("T", " ")
+        closed  = (t["resolved_at"] or "")[:16].replace("T", " ")
+        timing  = f"opened {opened}" + (f"  closed {closed}" if closed else "  (open)")
+        print(f"  {status} #{t['id']:>2}  {timing}  {title}")
+    print()
 
 
 def _print_bankroll(conn: sqlite3.Connection):
