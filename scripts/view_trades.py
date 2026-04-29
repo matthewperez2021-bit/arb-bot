@@ -179,20 +179,22 @@ def show_trades(conn, session_id: str):
     print(f"  Trades:  {len(trades)}  ({wins} won / {losses} lost / {open_c} open)")
     print()
 
-    hdr = (f"  {'#':>2}  {'Status':<6}  {'Ticker':<48}  {'Side':3}  "
-           f"{'Ask':>5}  {'Edge':>5}  {'Stake':>7}  {'ExpProfit':>9}  {'ActProfit':>9}  Sport")
+    hdr = (f"  {'#':>2}  {'Status':<6}  {'Opened':<16}  {'Closed':<16}  {'Side':3}  "
+           f"{'Edge':>5}  {'Stake':>7}  {'ExpProfit':>9}  {'ActProfit':>9}  Sport")
     print(hdr)
     print("  " + "-" * (len(hdr) - 2))
 
     for t in trades:
-        status = _outcome_icon(t["outcome"])
-        act    = t["actual_profit"]
-        act_str = f"${act:>+8.2f}" if act is not None else "   pending"
+        status   = _outcome_icon(t["outcome"])
+        act      = t["actual_profit"]
+        act_str  = f"${act:>+8.2f}" if act is not None else "   pending"
+        opened   = (t["opened_at"] or "")[:16].replace("T", " ")
+        closed   = (t["resolved_at"] or "")[:16].replace("T", " ") or "open          "
         print(
-            f"  {t['id']:>2}  {status}  {t['kalshi_ticker']:<48}  "
-            f"{t['kalshi_side'].upper():<3}  {t['kalshi_ask']:>5.3f}  "
-            f"{t['net_edge_pct']:>4.1f}%  ${t['total_stake']:>6.2f}  "
-            f"${t['expected_profit']:>8.2f}  {act_str}  {t['sport'] or ''}"
+            f"  {t['id']:>2}  {status}  {opened:<16}  {closed:<16}  "
+            f"{t['kalshi_side'].upper():<3}  {t['net_edge_pct']:>4.1f}%  "
+            f"${t['total_stake']:>6.2f}  ${t['expected_profit']:>8.2f}  "
+            f"{act_str}  {t['sport'] or ''}"
         )
 
     print()
@@ -208,9 +210,12 @@ def show_trades(conn, session_id: str):
 
     print("  -- TITLES --")
     for t in trades:
-        status = _outcome_icon(t["outcome"])
-        title  = t['kalshi_title'] or t['kalshi_ticker']
-        print(f"  {status} #{t['id']:>2}  {title}")
+        status   = _outcome_icon(t["outcome"])
+        title    = t['kalshi_title'] or t['kalshi_ticker']
+        opened   = (t["opened_at"] or "")[:16].replace("T", " ")
+        closed   = (t["resolved_at"] or "")[:16].replace("T", " ")
+        timing   = f"  opened {opened}" + (f"  closed {closed}" if closed else "  (open)")
+        print(f"  {status} #{t['id']:>2}{timing}  {title}")
     print()
 
 
@@ -228,19 +233,19 @@ def show_all(conn):
     print(f"  All {len(trades)} trades (most recent first):")
     print()
 
-    hdr = (f"  {'#':>4}  {'Status':<6}  {'Session':<20}  {'Date':<16}  "
+    hdr = (f"  {'#':>4}  {'Status':<6}  {'Opened':<16}  {'Closed':<16}  "
            f"{'Side':3}  {'Edge':>5}  {'Stake':>7}  {'ActProfit':>9}  Sport")
     print(hdr)
     print("  " + "-" * (len(hdr) - 2))
 
     for t in trades:
-        date_s   = t['opened_at'][:16].replace("T", " ")
-        sess_s   = t['session_id'].replace("sports_", "")[-16:]
-        status   = _outcome_icon(t["outcome"])
-        act      = t["actual_profit"]
-        act_str  = f"${act:>+8.2f}" if act is not None else "   pending"
+        opened  = (t["opened_at"]   or "")[:16].replace("T", " ")
+        closed  = (t["resolved_at"] or "")[:16].replace("T", " ") or "open          "
+        status  = _outcome_icon(t["outcome"])
+        act     = t["actual_profit"]
+        act_str = f"${act:>+8.2f}" if act is not None else "   pending"
         print(
-            f"  {t['id']:>4}  {status}  {sess_s:<20}  {date_s:<16}  "
+            f"  {t['id']:>4}  {status}  {opened:<16}  {closed:<16}  "
             f"{t['kalshi_side'].upper():<3}  {t['net_edge_pct']:>4.1f}%  "
             f"${t['total_stake']:>6.2f}  {act_str}  {t['sport'] or ''}"
         )
