@@ -39,6 +39,16 @@ def main():
             logf.write(f"Run #{run_number} at {now}\n")
             logf.write(f"{'='*70}\n")
 
+            # Step 1: settle any open trades first
+            resolve = subprocess.run(
+                [sys.executable, "scripts/resolve_trades.py"],
+                capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
+            )
+            logf.write("[resolve_trades]\n")
+            logf.write(resolve.stdout)
+
+            # Step 2: scan for new opportunities
             result = subprocess.run(
                 [
                     sys.executable,
@@ -58,6 +68,9 @@ def main():
                 logf.write(result.stderr)
 
         # Print a short summary to the console
+        for line in resolve.stdout.splitlines():
+            if any(kw in line for kw in ["Bankroll", "Current:", "Settled", "WIN", "LOSS", "ERROR"]):
+                print(f"  {line.strip()}")
         lines = result.stdout.splitlines()
         for line in lines:
             if any(kw in line for kw in ["deployed", "Expected profit", "Trades placed", "opportunities", "ERROR"]):
