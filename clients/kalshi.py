@@ -533,15 +533,22 @@ class KalshiClient:
         """
         Check if a market has resolved.
 
+        Kalshi uses two terminal statuses:
+          - "finalized" — outcome determined, ready for payout (most common)
+          - "settled"   — payout completed
+        Both indicate the market has a final result.
+
         Returns:
             (resolved: bool, result: str | None)
             result is "yes" or "no" if resolved, None otherwise.
         """
         mkt = self.get_market(ticker)
         market = mkt.get("market", mkt)
-        status = market.get("status", "")
-        result = market.get("result")   # "yes" | "no" | None
-        return status == "settled", result
+        status = (market.get("status") or "").lower()
+        result = (market.get("result") or "").lower() or None
+        # Also treat empty-string result as unresolved even if status is terminal
+        is_resolved = status in ("settled", "finalized") and result in ("yes", "no")
+        return is_resolved, result
 
     def get_settlement_value(self, ticker: str, side: str, contracts: int) -> float:
         """
