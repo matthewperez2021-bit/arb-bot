@@ -918,7 +918,8 @@ def main():
                              "Overrides ACTIVE_STRATEGY in config/strategies.py.")
     parser.add_argument("--strategies", type=str, default=None,
                         help="A/B mode: comma-separated list, e.g. 'v1,v2'. "
-                             "Each strategy gets capital / N as its bankroll.")
+                             "Each strategy gets the FULL --capital bankroll "
+                             "(total exposure can be N * capital).")
     parser.add_argument("--verbose",    action="store_true",
                         help="Show DEBUG logs")
     args = parser.parse_args()
@@ -939,10 +940,14 @@ def main():
             print(f"  {e}")
             sys.exit(1)
 
-        per_strategy_capital = args.capital / len(strategies)
+        # Each strategy gets the FULL bankroll (no split). The hard cap on
+        # total capital deployed is enforced per-strategy by
+        # strategy.max_total_deployed_usd, so runaway exposure is still bounded.
+        per_strategy_capital = args.capital
+        total_max_exposure = sum(s.max_total_deployed_usd for s in strategies)
         print(f"\n  [A/B MODE]  {len(strategies)} strategies, "
-              f"${per_strategy_capital:,.2f} bankroll each "
-              f"(total ${args.capital:,.2f})\n")
+              f"${per_strategy_capital:,.2f} bankroll EACH "
+              f"(combined max exposure: ${total_max_exposure:,.2f})\n")
 
         for s in strategies:
             run_paper_test(
