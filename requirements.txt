@@ -29,6 +29,10 @@ python-dotenv>=1.0.0
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
 
+# ── OddsHarvester (supplemental sportsbook data via OddsPortal scraping) ─
+oddsharvester>=0.1.0            # pip install oddsharvester
+playwright>=1.57.0              # after install: playwright install chromium
+
 # ── Utilities ────────────────────────────────────────────────────────
 python-dateutil>=2.9.0
 pytz>=2024.1

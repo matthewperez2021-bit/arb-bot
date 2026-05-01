@@ -170,3 +170,25 @@ LABELED_PAIRS_PATH  = "tests/labeled_pairs.json"
 # ─────────────────────────────────────────────────────────────────────
 LLM_MODEL           = "claude-opus-4-6"     # Model used for market verification
 LLM_MAX_TOKENS      = 300
+
+# ─────────────────────────────────────────────────────────────────────
+# ODDS HARVESTER  (supplemental sportsbook data via OddsPortal)
+# Set ODDS_HARVESTER_ENABLED=True after running: pip install oddsharvester
+# then: playwright install chromium
+# ─────────────────────────────────────────────────────────────────────
+ODDS_HARVESTER_ENABLED        = False   # opt-in; requires Playwright install
+ODDS_HARVESTER_REFRESH_SECS   = 7200   # re-scrape every 2 hours (batch, slow)
+ODDS_HARVESTER_CACHE_PATH     = "data/harvester_cache.json"
+ODDS_HARVESTER_HISTORICAL_DIR = "data/historical_odds/"
+
+# Mapping from arb-bot sport keys → OddsHarvester sport name
+# MMA is not supported by OddsHarvester (no OddsPortal coverage)
+ODDS_HARVESTER_SPORT_MAP: dict = {
+    "mlb":          "baseball",
+    "nba":          "basketball",
+    "nhl":          "ice-hockey",
+    "nfl":          "american-football",
+    "mls":          "football",      # OddsHarvester uses "football" for soccer
+    "tennis_atp":   "tennis",
+    "tennis_wta":   "tennis",
+}

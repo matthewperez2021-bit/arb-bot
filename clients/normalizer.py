@@ -109,6 +109,10 @@ class NormalizedMarket:
     liquidity:   float = 0.0
     fetched_at:  float = field(default_factory=time.time)
     extra:       dict = field(default_factory=dict)   # platform-specific raw fields
+    # Supplemental odds-source fields (populated by OddsHarvesterClient)
+    source:               str = "odds_api"              # "odds_api" | "odds_harvester"
+    bookmaker_breakdown:  Optional[dict] = None         # {bookmaker: devigged_prob}
+    best_available:       Optional[float] = None        # best line across all sources
 
 
 # ─────────────────────────────────────────────────────────────────────────────

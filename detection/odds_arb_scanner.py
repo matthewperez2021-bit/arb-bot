@@ -111,11 +111,12 @@ class OddsArbScanner:
         min_legs_priced: int   = 1,
         near_miss_pct:   float = 2.0,
     ):
-        self.min_edge        = min_edge
-        self.min_books       = min_books
-        self.min_legs_priced = min_legs_priced
-        self.near_miss_pct   = near_miss_pct
-        self.odds_client     = OddsAPIClient()
+        self.min_edge         = min_edge
+        self.min_books        = min_books
+        self.min_legs_priced  = min_legs_priced
+        self.near_miss_pct    = near_miss_pct
+        self.odds_client      = OddsAPIClient()
+        self._harvester_cache: dict = {}
         log.info(
             "OddsArbScanner initialized (min_edge=%.1f%%, min_books=%d)",
             min_edge * 100, min_books,
@@ -153,6 +154,7 @@ class OddsArbScanner:
         fetch_book: Callable[[NormalizedMarket], Optional[NormalizedMarketBook]],
         sportsbook_events: list,
         prop_cache: dict = None,
+        harvester_cache: dict = None,
     ) -> list:
         """
         Main entry point. Returns OddsArbOpportunity list sorted by net_edge desc.
@@ -161,6 +163,9 @@ class OddsArbScanner:
             kalshi_markets:    list of NormalizedMarket (KXMVE series)
             fetch_book:        callable(market) -> NormalizedMarketBook | None
             sportsbook_events: pre-fetched list of Odds API event dicts
+            prop_cache:        optional player prop cache from OddsAPIClient
+            harvester_cache:   optional HarvesterCache from OddsHarvesterClient
+                               consulted when Odds API has no line for a team
         """
         if not kalshi_markets or not sportsbook_events:
             log.info(
@@ -171,10 +176,13 @@ class OddsArbScanner:
 
         # Build team-name variant lookup once from all events
         team_variants  = build_team_variants(sportsbook_events)
-        self._prop_cache = prop_cache or {}
+        self._prop_cache     = prop_cache or {}
+        self._harvester_cache = harvester_cache or {}
         log.info(
-            "OddsArbScanner: %d markets | %d sportsbook events | %d team variants",
+            "OddsArbScanner: %d markets | %d sportsbook events | %d team variants | "
+            "%d harvester teams",
             len(kalshi_markets), len(sportsbook_events), len(team_variants),
+            len(self._harvester_cache),
         )
 
         opportunities = []
@@ -355,29 +363,62 @@ class OddsArbScanner:
     ) -> Optional[tuple]:
         """
         Find the team in team_variants and return its devigged win probability.
+
+        Falls back to OddsHarvester cache when Odds API has no line for the team.
+        Uses the source with the higher book count when both are available.
         """
-        # Direct lookup first
+        # ── Primary: The Odds API ──────────────────────────────────────
         match = team_variants.get(leg.subject)
 
-        # Substring search as fallback
         if match is None:
             for variant, val in team_variants.items():
                 if variant in leg.subject or leg.subject in variant:
-                    if len(variant) >= 4:   # avoid matching very short tokens
+                    if len(variant) >= 4:
                         match = val
                         break
 
-        if match is None:
+        odds_api_result = None
+        if match is not None:
+            full_team_name, event = match
+            prob, books = self._consensus_prob(event, full_team_name)
+            if prob is not None:
+                sport = event.get("sport_key", "")
+                odds_api_result = (prob, books, sport)
+
+        # ── Fallback / supplement: OddsHarvester cache ────────────────
+        harvester_result = None
+        if self._harvester_cache:
+            from clients.odds_harvester_client import OddsHarvesterClient
+            client = OddsHarvesterClient.__new__(OddsHarvesterClient)
+            harvester_lookup = client.lookup_team(leg.subject, self._harvester_cache)
+            if harvester_lookup is not None:
+                h_prob, h_books, h_sport = harvester_lookup
+                harvester_result = (h_prob, h_books, h_sport)
+
+        # ── Pick best source (highest n_books; prefer Odds API on tie) ─
+        if odds_api_result is None and harvester_result is None:
             return None
 
-        full_team_name, event = match
-        prob, books = self._consensus_prob(event, full_team_name)
+        if odds_api_result is None:
+            log.debug(
+                "OddsArbScanner: using OddsHarvester for '%s' (no Odds API line)",
+                leg.subject,
+            )
+            return harvester_result
 
-        if prob is None:
-            return None
+        if harvester_result is None:
+            return odds_api_result
 
-        sport = event.get("sport_key", "")
-        return prob, books, sport
+        # Both available — use the one with more bookmakers
+        if harvester_result[1] > odds_api_result[1]:
+            log.debug(
+                "OddsArbScanner: OddsHarvester has more books for '%s' "
+                "(%d vs %d) — using harvester prob=%.4f",
+                leg.subject, harvester_result[1], odds_api_result[1], harvester_result[0],
+            )
+            return harvester_result
+
+        return odds_api_result
 
     def _consensus_prob(
         self,
