@@ -12,7 +12,7 @@ This is an **automated sports arbitrage bot** that exploits pricing inefficienci
 
 ---
 
-## Current State Snapshot (2026-04-29)
+## Current State Snapshot (2026-05-01)
 
 | Metric | Value |
 |---|---|
@@ -43,17 +43,21 @@ Always `cd` here first in PowerShell before running any command.
 | Path | What it does |
 |---|---|
 | `config/strategies.py` | **Strategy registry** — versioned dataclasses (v1, v2, ...). Edit `ACTIVE_STRATEGY` to switch. |
-| `config/settings.py` | Global constants (API keys, fees, exchange URLs). Most tunables now live in strategies.py. |
+| `config/settings.py` | Global constants (API keys, fees, exchange URLs, OddsHarvester settings). |
 | `scripts/sports_paper_test.py` | The main scan + trade pipeline. Takes `--strategy` and `--strategies`. |
-| `scripts/sports_scheduler.py` | Hourly background loop. Runs resolver then paper test. |
+| `scripts/sports_scheduler.py` | Hourly background loop. Runs resolver then paper test. Refreshes OddsHarvester cache every 2h. |
 | `scripts/resolve_trades.py` | Checks Kalshi for settled markets, updates P&L + bankroll. |
 | `scripts/view_trades.py` | Read-only viewer. Flags: `--status`, `--strategies`, `--session`, `--all` |
 | `scripts/analyze_performance.py` | Slices settled trades by side/sport/edge/legs/etc. |
+| `scripts/seed_backtest_data.py` | Seeds `data/historical_odds/` with per-bookmaker data for backtesting. |
 | `clients/kalshi.py` | Kalshi API client (auth, orderbook, market lookup, `is_market_resolved`). |
 | `clients/odds_api.py` | Odds API client (h2h + player props, devig logic, prop cache). |
-| `detection/odds_arb_scanner.py` | Core: parses KXMVE titles, prices legs, computes net edge. |
+| `clients/odds_harvester_client.py` | OddsHarvester wrapper — scrapes OddsPortal, devigs decimal odds, builds team prob cache. |
+| `detection/odds_arb_scanner.py` | Core: parses KXMVE titles, prices legs, computes net edge. Accepts dual-source odds. |
 | `detection/kxmve_parser.py` | Parses parlay titles into structured legs (team_win, player_over, total_over). |
 | `data/arb_positions.db` | SQLite DB. Tables: `sports_paper_trades`, `bankroll`. |
+| `data/harvester_cache.json` | OddsHarvester team prob cache (auto-written, 2h TTL). |
+| `data/historical_odds/` | Per-bookmaker historical match data seeded by `seed_backtest_data.py`. |
 
 ---
 
@@ -65,6 +69,7 @@ python scripts/sports_paper_test.py                           # uses ACTIVE_STRA
 python scripts/sports_paper_test.py --strategy v2             # force a version
 python scripts/sports_paper_test.py --strategies v1,v2        # A/B (each gets FULL bankroll)
 python scripts/sports_scheduler.py --strategies v1,v2         # hourly background loop
+python scripts/sports_scheduler.py --no-harvester             # skip OddsHarvester refresh
 ```
 
 ### Settle / resolve
@@ -185,6 +190,33 @@ These are intentional behaviors — don't "fix" them:
 
 ---
 
+## OddsHarvester Integration (added 2026-05-01)
+
+Supplemental sportsbook data source via OddsPortal scraping (Playwright-based).
+Runs on a 2h batch cycle — never blocks the 45s scan loop.
+
+**To activate:**
+```powershell
+pip install oddsharvester playwright
+python -m playwright install chromium
+# Then in config/settings.py: ODDS_HARVESTER_ENABLED = True
+```
+
+**How it fits in:**
+- `OddsHarvesterClient.fetch_upcoming()` scrapes per-bookmaker decimal odds for 6 sports
+- Devigs them and stores `{team_norm: {prob, n_books, sport}}` in `data/harvester_cache.json`
+- `OddsArbScanner._price_team_leg()` checks harvester as fallback when Odds API has no line,
+  or uses harvester if it has more bookmakers contributing
+- `seed_backtest_data.py` uses the `scrape_historic` mode to fill `data/historical_odds/`
+
+**Sport mapping:** mlb→baseball, nba→basketball, nhl→ice-hockey, nfl→american-football,
+mls→football, tennis_atp→tennis. MMA not covered by OddsPortal.
+
+**Known issue:** `CommandEnum.UPCOMING_MATCHES` required (plain string "scrape_upcoming" fails).
+Already fixed in `odds_harvester_client.py`.
+
+---
+
 ## Open Roadmap Items (not yet built)
 
 - Same-game leg correlation discount (currently treats parlay legs as independent)
@@ -193,6 +225,7 @@ These are intentional behaviors — don't "fix" them:
 - Time-to-close filter (only trade markets closing within 24h — sportsbook lines sharpest then)
 - Live trading mode (currently paper only)
 - More sportsbook coverage for player props (currently 1-2 books per prop)
+- Wire `harvester_cache` into `sports_paper_test.py` scan call (reads cache from disk automatically once enabled)
 
 ---
 
@@ -202,7 +235,7 @@ These are intentional behaviors — don't "fix" them:
 - **Python:** 3.14 (per the user's installation)
 - **Database:** SQLite at `data/arb_positions.db`
 - **Logs:** `data/sports_scheduler.log`, `data/sports_paper_test.log`
-- **APIs used:** Kalshi (real account), The Odds API (Starter tier, 5000 req/mo)
+- **APIs used:** Kalshi (real account), The Odds API (Starter tier, 5000 req/mo), OddsHarvester (free, OddsPortal scraping — disabled by default)
 - **Repo:** https://github.com/matthewperez2021-bit/arb-bot (push to `main`)
 
 ---
