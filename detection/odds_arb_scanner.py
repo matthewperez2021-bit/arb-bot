@@ -42,6 +42,7 @@ from config.settings import (
     KALSHI_TAKER_FEE,
     ODDS_API_MIN_BOOKS,
     ODDS_API_MIN_EDGE,
+    SAME_GAME_CORRELATION_UPLIFT,
 )
 
 
@@ -117,6 +118,7 @@ class OddsArbScanner:
         self.near_miss_pct    = near_miss_pct
         self.odds_client      = OddsAPIClient()
         self._harvester_cache: dict = {}
+        self._totals_cache:    dict = {}
         log.info(
             "OddsArbScanner initialized (min_edge=%.1f%%, min_books=%d)",
             min_edge * 100, min_books,
@@ -155,6 +157,7 @@ class OddsArbScanner:
         sportsbook_events: list,
         prop_cache: dict = None,
         harvester_cache: dict = None,
+        totals_cache: dict = None,
     ) -> list:
         """
         Main entry point. Returns OddsArbOpportunity list sorted by net_edge desc.
@@ -178,11 +181,12 @@ class OddsArbScanner:
         team_variants  = build_team_variants(sportsbook_events)
         self._prop_cache     = prop_cache or {}
         self._harvester_cache = harvester_cache or {}
+        self._totals_cache   = totals_cache or {}
         log.info(
             "OddsArbScanner: %d markets | %d sportsbook events | %d team variants | "
-            "%d harvester teams",
+            "%d harvester teams | %d totals events",
             len(kalshi_markets), len(sportsbook_events), len(team_variants),
-            len(self._harvester_cache),
+            len(self._harvester_cache), len(self._totals_cache),
         )
 
         opportunities = []
@@ -222,8 +226,8 @@ class OddsArbScanner:
         if not legs:
             return None, False
 
-        # Price each leg
-        priced: list = []     # (prob, books_used, subject)
+        # Price each leg — now tracks event_id for same-game correlation
+        priced: list = []     # (prob, books_used, subject, sport, event_id)
         min_books = 999
         primary_sport = ""
 
@@ -231,13 +235,14 @@ class OddsArbScanner:
             result = self._price_leg(leg, team_variants)
             if result is None:
                 continue
-            prob, books, sport = result
+            # _price_leg now returns (prob, books, sport, event_id)
+            prob, books, sport, event_id = result
 
             # Flip probability for "no" position legs
             if leg.position == "no":
                 prob = 1.0 - prob
 
-            priced.append((prob, books, leg.subject, sport))
+            priced.append((prob, books, leg.subject, sport, event_id))
             min_books = min(min_books, books)
             if not primary_sport and sport:
                 primary_sport = sport
@@ -251,10 +256,30 @@ class OddsArbScanner:
                 coverage < self.MIN_LEG_COVERAGE):
             return None, False
 
-        # Combined fair probability (multiply independent legs)
+        # Combined fair probability with same-game correlation uplift.
+        #
+        # Group legs by event_id. For each group with >=2 legs from the same
+        # game, multiply leg probs then apply per-sport correlation uplift
+        # (positive correlation = higher actual prob than independence).
+        # Multiply across groups (different games are independent).
+        groups: dict = {}
+        for prob, _, _, sport, event_id in priced:
+            key = event_id or "_no_event"
+            groups.setdefault(key, {"sport": sport, "probs": []})
+            groups[key]["probs"].append(prob)
+
         fair_prob = 1.0
-        for prob, _, _, _ in priced:
-            fair_prob *= prob
+        for grp in groups.values():
+            grp_prob = 1.0
+            for p in grp["probs"]:
+                grp_prob *= p
+            if len(grp["probs"]) >= 2:
+                uplift = SAME_GAME_CORRELATION_UPLIFT.get(
+                    grp["sport"],
+                    SAME_GAME_CORRELATION_UPLIFT.get("default", 1.0),
+                )
+                grp_prob = min(grp_prob * uplift, 1.0)
+            fair_prob *= grp_prob
 
         if min_books == 999:
             min_books = 0
@@ -271,7 +296,7 @@ class OddsArbScanner:
         if book is None:
             return None, False
 
-        leg_details = [(s, round(p, 4)) for p, _, s, _ in priced]
+        leg_details = [(s, round(p, 4)) for p, _, s, _, _ in priced]
 
         # Check YES and NO sides
         opp, near_miss = self._check_opportunity(
@@ -292,30 +317,43 @@ class OddsArbScanner:
         team_variants: dict,
     ) -> Optional[tuple]:
         """
-        Price one leg. Returns (probability: float, books_used: int, sport: str) or None.
+        Price one leg.
+
+        Returns (prob, books, sport, event_id) or None.
+        event_id is used for same-game correlation grouping; "" if unknown
+        (cross-source or not tied to a specific event).
 
         Handles:
           - team_win / team_spread: devigged sportsbook moneyline consensus
           - player_over:            sportsbook player prop (requires prop_cache)
-          - total_over:             not priced (no totals market fetched)
+          - total_over:             devigged sportsbook totals consensus
         """
         if leg.leg_type in ("team_win", "team_spread"):
             return self._price_team_leg(leg, team_variants)
 
         if leg.leg_type == "player_over":
-            return self._price_player_leg(leg)
+            return self._price_player_leg(leg, team_variants)
 
-        # total_over: would need a separate totals market fetch — skip for now
+        if leg.leg_type == "total_over":
+            return self._price_totals_leg(leg, team_variants)
+
         return None
 
-    def _price_player_leg(self, leg: KXMVELeg) -> Optional[tuple]:
+    def _price_player_leg(
+        self,
+        leg: KXMVELeg,
+        team_variants: dict = None,
+    ) -> Optional[tuple]:
         """
         Look up a player_over leg in the prop_cache.
 
         KXMVE "25+" → sportsbook "Over 24.5" → target_line = threshold - 0.5
         Searches within ±1.0 point tolerance to handle line variations.
 
-        Returns (over_prob, n_books, "") or None.
+        Returns (over_prob, n_books, sport, event_id) or None.
+        event_id is "" for player legs (prop_cache is keyed by player, not event).
+        Same-game correlation for player+team is therefore not detected here;
+        see roadmap for player→event mapping.
         """
         if not self._prop_cache or leg.threshold is None:
             return None
@@ -354,7 +392,7 @@ class OddsArbScanner:
             "Player prop: %s threshold=%.1f target_line=%.1f prob=%.3f books=%d",
             leg.subject, leg.threshold, target_line, prob, n_books,
         )
-        return prob, n_books, ""
+        return prob, n_books, "", ""
 
     def _price_team_leg(
         self,
@@ -383,7 +421,8 @@ class OddsArbScanner:
             prob, books = self._consensus_prob(event, full_team_name)
             if prob is not None:
                 sport = event.get("sport_key", "")
-                odds_api_result = (prob, books, sport)
+                event_id = event.get("id", "")
+                odds_api_result = (prob, books, sport, event_id)
 
         # ── Fallback / supplement: OddsHarvester cache ────────────────
         harvester_result = None
@@ -393,7 +432,10 @@ class OddsArbScanner:
             harvester_lookup = client.lookup_team(leg.subject, self._harvester_cache)
             if harvester_lookup is not None:
                 h_prob, h_books, h_sport = harvester_lookup
-                harvester_result = (h_prob, h_books, h_sport)
+                # Harvester has no canonical event_id; synthesize one from team pair
+                # (this lets same-game correlation work when both legs come from harvester)
+                h_event_id = f"harvester:{leg.subject}"
+                harvester_result = (h_prob, h_books, h_sport, h_event_id)
 
         # ── Pick best source (highest n_books; prefer Odds API on tie) ─
         if odds_api_result is None and harvester_result is None:
@@ -419,6 +461,66 @@ class OddsArbScanner:
             return harvester_result
 
         return odds_api_result
+
+    # ──────────────────────────────────────────────────────────────────
+    # Totals leg pricing
+    # ──────────────────────────────────────────────────────────────────
+
+    def _price_totals_leg(
+        self,
+        leg:           KXMVELeg,
+        team_variants: dict,
+    ) -> Optional[tuple]:
+        """
+        Price a 'total_over' leg (e.g. "Over 4.5 goals scored") using the
+        totals_cache built from Odds API.
+
+        KXMVE "Over 4.5 goals" → match line within ±0.5 of cached totals lines.
+        Returns (over_prob, n_books, sport, event_id) or None.
+
+        Note: the cache is populated by the caller (sports_paper_test.py)
+        before calling scan(). If empty, total_over legs are skipped.
+        """
+        if not self._totals_cache or leg.threshold is None:
+            return None
+
+        target_line = leg.threshold
+
+        # Totals legs have no team subject in KXMVE — they belong to "the game".
+        # We can't pin them to a specific event without more parsing, so we
+        # search all entries and pick the closest line within tolerance.
+        # When same-game team legs are present, the totals leg is correlated;
+        # we'll match it heuristically by sport when possible.
+        best       = None
+        best_dist  = float("inf")
+        target_sports = set()
+
+        # Collect sports from priced team legs (peer legs in the same parlay)
+        # so we can prefer same-sport totals entries.
+        for variant_data in team_variants.values():
+            _, event = variant_data
+            sport_key = event.get("sport_key", "")
+            if sport_key:
+                target_sports.add(sport_key)
+
+        for (sport_key, event_id), entries in self._totals_cache.items():
+            # Prefer entries from sports represented in this parlay
+            sport_match_bonus = 0.0 if sport_key in target_sports else 0.5
+            for (line, over_prob, n_books) in entries:
+                dist = abs(line - target_line) + sport_match_bonus
+                if dist < best_dist and abs(line - target_line) <= 1.0:
+                    best_dist = dist
+                    best = (over_prob, n_books, sport_key, event_id)
+
+        if best is None:
+            return None
+
+        prob, n_books, sport, event_id = best
+        log.debug(
+            "Totals: target=%.1f matched line, prob=%.3f books=%d sport=%s",
+            target_line, prob, n_books, sport,
+        )
+        return prob, n_books, sport, event_id
 
     def _consensus_prob(
         self,

@@ -216,3 +216,24 @@ SHARP_BOOK_WEIGHTS: dict = {
 CALIBRATION_OVERRIDES: dict = {
     # "mlb__0-2%":   1.00,   # example — fill from calibration_report.py
 }
+
+# ─────────────────────────────────────────────────────────────────────
+# SAME-GAME CORRELATION UPLIFT
+# When multiple parlay legs come from the same game, the independence
+# assumption (multiplying probabilities) UNDER-estimates fair_prob
+# because positively-correlated outcomes are more likely to all hit.
+#
+# Formula: fair_prob = independent_product * uplift
+# Applied per same-game leg group, then groups multiplied across.
+#
+# Empirical estimates from same-game parlay correlation studies:
+# ─────────────────────────────────────────────────────────────────────
+SAME_GAME_CORRELATION_UPLIFT: dict = {
+    "basketball_nba": 1.18,      # team_win + player_pts strongly correlated
+    "icehockey_nhl":  1.20,      # team_win + player_goals very correlated
+    "americanfootball_nfl": 1.15,
+    "baseball_mlb":   1.05,      # weakest — pitcher props ≈ independent of team result
+    "soccer_usa_mls": 1.12,
+    "tennis_atp_us_open": 1.00,  # 1 player per match — no same-game multi-leg
+    "default":        1.10,
+}

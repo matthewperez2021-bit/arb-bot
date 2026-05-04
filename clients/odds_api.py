@@ -315,6 +315,118 @@ class OddsAPIClient:
         return all_events
 
     # ─────────────────────────────────────────────────────────────────
+    # Totals (game over/under)
+    # ─────────────────────────────────────────────────────────────────
+
+    def get_totals_for_sport(
+        self,
+        sport: str,
+        bookmakers: list = None,
+    ) -> dict:
+        """
+        Fetch over/under totals for all events in a sport, devigged.
+
+        Returns a totals_cache fragment:
+            {(sport_key, event_id): [(line, over_prob, n_books), ...]}
+
+        Each entry is one offered line (e.g. 4.5 goals, 220.5 points)
+        with the devigged Over probability averaged across books.
+
+        One API credit per call. Caller should cache externally.
+        """
+        sport_key = SPORTS.get(sport, sport)
+        books     = ",".join(bookmakers or DEFAULT_BOOKMAKERS)
+
+        params = {
+            "bookmakers":  books,
+            "markets":     "totals",
+            "regions":     "us",
+            "oddsFormat":  "american",
+            "dateFormat":  "iso",
+        }
+
+        try:
+            events = self._get(f"/v4/sports/{sport_key}/odds/", params=params)
+        except OddsAPIError as exc:
+            if exc.status_code in (404, 422):
+                log.debug("No totals for %s (off-season)", sport_key)
+                return {}
+            raise
+
+        # Parse: per-event, per-line, devig over/under, average across books
+        cache: dict = {}
+        for event in events:
+            event_id = event.get("id", "")
+            ev_key   = (sport_key, event_id)
+
+            # Group raw probs by line: {line: {"over": [raw_probs], "under": [raw_probs]}}
+            by_line: dict = {}
+
+            for book in event.get("bookmakers", []):
+                for market in book.get("markets", []):
+                    if market.get("key") != "totals":
+                        continue
+                    outcomes = market.get("outcomes", [])
+                    # Each book gives one Over and one Under at the same line
+                    book_pairs: dict = {}
+                    for o in outcomes:
+                        name  = (o.get("name") or "").lower()
+                        line  = o.get("point")
+                        price = o.get("price")
+                        if line is None or price is None:
+                            continue
+                        if name not in ("over", "under"):
+                            continue
+                        book_pairs.setdefault(line, {})[name] = self.american_to_implied(price)
+
+                    # Devig Over/Under pair per line per book
+                    for line, sides in book_pairs.items():
+                        over_raw  = sides.get("over")
+                        under_raw = sides.get("under")
+                        if over_raw is None or under_raw is None:
+                            continue
+                        total = over_raw + under_raw
+                        if total <= 0:
+                            continue
+                        over_devigged = over_raw / total
+                        by_line.setdefault(line, []).append(over_devigged)
+
+            # Average across books for each line
+            entries = []
+            for line, probs in by_line.items():
+                if not probs:
+                    continue
+                avg_over = sum(probs) / len(probs)
+                entries.append((float(line), avg_over, len(probs)))
+
+            if entries:
+                cache[ev_key] = entries
+
+        log.info("OddsAPI: fetched totals for %s — %d events with totals data",
+                 sport_key, len(cache))
+        return cache
+
+    def build_totals_cache(self, sports: list, bookmakers: list = None) -> dict:
+        """
+        Aggregate totals across multiple sports.
+
+        Returns merged totals_cache: {(sport_key, event_id): [(line, over_prob, n_books)]}
+        """
+        merged: dict = {}
+        for sport in sports:
+            try:
+                fragment = self.get_totals_for_sport(sport, bookmakers=bookmakers)
+                merged.update(fragment)
+            except OddsAPIError as e:
+                if e.status_code in (404, 422):
+                    log.debug("Totals: %s off-season — skipping", sport)
+                    continue
+                log.warning("Totals fetch failed for %s: %s", sport, e)
+        log.info("OddsAPI: totals cache built — %d events across %d sports",
+                 len(merged), len(sports))
+        return merged
+
+    # ─────────────────────────────────────────────────────────────────
     # Probability math
     # ─────────────────────────────────────────────────────────────────
 

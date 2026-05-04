@@ -63,13 +63,65 @@ STRATEGIES: Dict[str, Strategy] = {
         excluded_sports=frozenset(),
         allowed_sides=frozenset({"yes", "no"}),
     ),
-    # ── Add v2, v3, ... here. Do NOT edit v1. ─────────────────────────────────
+    "v2": Strategy(
+        name="v2",
+        created_at="2026-05-01",
+        notes=(
+            "Quality filters across all sports: cap parlays at 3 legs, "
+            "discard 'too good to be true' edges >12%, raise min edge to 4%. "
+            "(NBA/NHL exclusion lifted — v2 had 0 trades; not enough data to justify.)"
+        ),
+        min_net_edge=0.04,
+        max_per_trade_usd=50.0,
+        max_total_deployed_usd=2000.0,
+        kelly_fraction=0.5,
+        min_books=2,
+        max_legs=3,
+        max_trusted_edge_pct=12.0,
+        excluded_sports=frozenset(),
+        allowed_sides=frozenset({"yes", "no"}),
+    ),
+    "v3": Strategy(
+        name="v3",
+        created_at="2026-04-30",
+        notes=(
+            "Ultra-aggressive: full Kelly, $100 max/trade, 0.5% min edge, "
+            "no sport/leg/side/edge-cap filters, single-book pricing accepted."
+        ),
+        min_net_edge=0.005,                  # 0.5% — capture nearly every mispricing
+        max_per_trade_usd=100.0,             # double v1/v2 — bigger bets on each edge
+        max_total_deployed_usd=2000.0,
+        kelly_fraction=1.0,                  # full Kelly — maximum theoretical growth
+        min_books=1,                         # accept single-book fair_prob estimates
+        max_legs=99,                         # no parlay-leg cap
+        max_trusted_edge_pct=100.0,          # no "too good to be true" filter
+        excluded_sports=frozenset(),         # trade every sport
+        allowed_sides=frozenset({"yes", "no"}),
+    ),
+    "v4": Strategy(
+        name="v4",
+        created_at="2026-05-01",
+        notes=(
+            "High-volume small-stakes: $20 max/trade, 0.3% min edge, "
+            "no filters — chase every micro-edge for steady singles."
+        ),
+        min_net_edge=0.003,                  # 0.3% — accept tiny edges
+        max_per_trade_usd=20.0,              # hard cap per ticket
+        max_total_deployed_usd=2000.0,
+        kelly_fraction=0.5,                  # half-Kelly (cap binds first anyway)
+        min_books=2,                         # keep at least some quality
+        max_legs=99,                         # no parlay-leg cap
+        max_trusted_edge_pct=100.0,          # no "too good to be true" filter
+        excluded_sports=frozenset(),         # trade every sport
+        allowed_sides=frozenset({"yes", "no"}),
+    ),
+    # ── Add v5, v6, ... here. Do NOT edit past versions. ─────────────────────
 }
 
 
 # Single source of truth for which strategy the scheduler / paper test runs.
 # Override on the command line with --strategy <name>.
-ACTIVE_STRATEGY: str = "v1"
+ACTIVE_STRATEGY: str = "v2"
 
 
 def get(name: str | None = None) -> Strategy:
