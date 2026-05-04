@@ -44,6 +44,22 @@ EDGE_BUCKETS = [
 ]
 
 
+def predicted_win_prob(trade: dict) -> float:
+    """
+    Our predicted probability of WINNING this trade.
+
+    For YES trades: equals fair_prob (we win when YES outcome happens).
+    For NO  trades: equals (1 - fair_prob) (we win when NO outcome happens).
+
+    fair_prob is always stored as the parlay's YES probability, regardless
+    of which side we traded.
+    """
+    fp = trade.get("fair_prob") or 0.0
+    if trade.get("kalshi_side") == "no":
+        return 1.0 - fp
+    return fp
+
+
 def bucket_label(net_edge_pct: float) -> str:
     """Map a net_edge_pct (e.g. 5.2) to its bucket label."""
     e = net_edge_pct / 100.0
@@ -112,7 +128,7 @@ def build_buckets(trades: list, min_trades: int = 1) -> list:
         losses = n - wins
 
         actual_wr      = wins / n
-        predicted_wr   = sum(t["fair_prob"] for t in bucket_trades) / n
+        predicted_wr   = sum(predicted_win_prob(t) for t in bucket_trades) / n
         calibration_f  = actual_wr / predicted_wr if predicted_wr > 0 else None
 
         avg_edge_pct   = sum(t["net_edge_pct"] for t in bucket_trades) / n
@@ -157,7 +173,7 @@ def build_sport_breakdown(trades: list, min_trades: int = 1) -> list:
             continue
         wins         = sum(1 for t in st if t["outcome"] == "won")
         actual_wr    = wins / n
-        predicted_wr = sum(t["fair_prob"] for t in st) / n
+        predicted_wr = sum(predicted_win_prob(t) for t in st) / n
         cal_f        = actual_wr / predicted_wr if predicted_wr > 0 else None
         total_stake  = sum(t["total_stake"] for t in st)
         total_profit = sum(t["actual_profit"] for t in st)
@@ -196,7 +212,7 @@ def print_report(buckets: list, sport_rows: list, trades: list, filters: str):
     n_clv     = sum(1 for t in trades if t.get("clv") is not None)
     wins      = sum(1 for t in trades if t["outcome"] == "won")
     overall_wr = wins / n_settled if n_settled else 0
-    overall_pred = sum(t["fair_prob"] for t in trades) / n_settled if n_settled else 0
+    overall_pred = sum(predicted_win_prob(t) for t in trades) / n_settled if n_settled else 0
 
     print(f"\n{'='*75}")
     print(f"  CALIBRATION REPORT{filters}")
@@ -214,7 +230,7 @@ def print_report(buckets: list, sport_rows: list, trades: list, filters: str):
 
     for b in buckets:
         cal_str = f"{b['calibration_f']:.3f}" if b["calibration_f"] is not None else "  n/a"
-        flag    = " ⚠" if b["calibration_f"] is not None and b["calibration_f"] < 0.80 else ""
+        flag    = " !" if b["calibration_f"] is not None and b["calibration_f"] < 0.80 else ""
         print(
             f"  {b['bucket']:<8} {b['n']:>4} {b['wins']:>4} {b['losses']:>4}  "
             f"{b['actual_wr']:>5.1%} {b['predicted_wr']:>6.1%} {cal_str:>7}  "
@@ -233,7 +249,7 @@ def print_report(buckets: list, sport_rows: list, trades: list, filters: str):
 
     for s in sport_rows:
         cal_str = f"{s['cal_f']:.3f}" if s["cal_f"] is not None else "  n/a"
-        flag    = " ⚠" if s["cal_f"] is not None and s["cal_f"] < 0.80 else ""
+        flag    = " !" if s["cal_f"] is not None and s["cal_f"] < 0.80 else ""
         print(
             f"  {s['sport']:<14} {s['n']:>4} {s['wins']:>4} {s['losses']:>4}  "
             f"{s['actual_wr']:>5.1%} {s['predicted_wr']:>6.1%} {cal_str:>7}  "
@@ -252,9 +268,9 @@ def print_report(buckets: list, sport_rows: list, trades: list, filters: str):
         print(f"  Average CLV: {avg_clv:+.4f}  |  "
               f"Positive CLV: {pos_clv}/{len(clv_trades)} ({pos_clv/len(clv_trades):.0%})")
         if avg_clv > 0:
-            print("  ✓ Positive avg CLV — entries are beating the closing line (real edge signal)")
+            print("  [+] Positive avg CLV — entries are beating the closing line (real edge signal)")
         else:
-            print("  ✗ Negative avg CLV — market moves against entries on average (review edge formula)")
+            print("  [-] Negative avg CLV — market moves against entries on average (review edge formula)")
     else:
         print(f"\n  CLV: no data yet (captured on next resolve cycle after today's trades settle)")
 
@@ -262,11 +278,11 @@ def print_report(buckets: list, sport_rows: list, trades: list, filters: str):
     bad_buckets = [b for b in buckets
                    if b["calibration_f"] is not None and b["calibration_f"] < 0.80]
     if bad_buckets:
-        print(f"\n  ⚠  CALIBRATION FLAGS (factor < 0.80 — Kelly oversized for these buckets):")
+        print(f"\n  !  CALIBRATION FLAGS (factor < 0.80 — Kelly oversized for these buckets):")
         for b in bad_buckets:
             print(f"     {b['bucket']}: predicted {b['predicted_wr']:.1%} WR, "
                   f"actual {b['actual_wr']:.1%} — factor {b['calibration_f']:.3f}")
-        print(f"     → Consider adding CALIBRATION_OVERRIDES to config/settings.py")
+        print(f"     -> Consider adding CALIBRATION_OVERRIDES to config/settings.py")
 
     print()
 
