@@ -176,6 +176,7 @@ def kelly_contracts(
     bankroll: float,
     max_stake_usd: float,
     kelly_fraction: float = 0.5,
+    sport: str = "",
 ) -> tuple:
     """
     Half-Kelly position size for a binary prediction market bet.
@@ -188,6 +189,11 @@ def kelly_contracts(
         b = (1 - c) / c       (you profit (1-c) per dollar risked, risking c)
         f* = (fair_prob - c) / (1 - c)   ← simplified Kelly for prediction market
 
+    Per-(sport, edge_bucket) calibration override is applied as a multiplier
+    on the Kelly fraction. See risk/kelly.calibration_factor() and
+    config.settings.CALIBRATION_OVERRIDES. If no override exists for this
+    sport+bucket, the multiplier is 1.0 (current behavior).
+
     Returns (contracts, stake_usd, kelly_frac).
     """
     cost = kalshi_ask * (1 + KALSHI_TAKER_FEE)  # cost including Kalshi 7% fee
@@ -199,7 +205,13 @@ def kelly_contracts(
     if f_star <= 0:
         return 0, 0.0, 0.0
 
-    half_k = f_star * kelly_fraction
+    # Apply historical calibration override based on sport + edge bucket
+    from risk.kelly import calibration_factor
+    net_edge = fair_prob - cost
+    cal_mult = calibration_factor(sport, net_edge)
+    effective_kf = kelly_fraction * cal_mult
+
+    half_k = f_star * effective_kf
     stake_usd = min(bankroll * half_k, max_stake_usd)
     contracts = max(1, int(stake_usd / cost))
     actual_stake = contracts * cost
@@ -893,6 +905,7 @@ def run_paper_test(
             bankroll=remaining,
             max_stake_usd=max_per_trade,
             kelly_fraction=effective_kelly,
+            sport=opp.sport or "",
         )
         if contracts < 1:
             continue
