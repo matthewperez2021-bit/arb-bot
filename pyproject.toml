@@ -1,0 +1,8 @@
+[tool.pytest.ini_options]
+# Only collect tests from the tests/ directory.
+# Without this, pytest auto-discovers any *_test.py file — which collides
+# with scripts/sports_paper_test.py (a runnable paper-trading script, not
+# a unit-test module).
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q"
