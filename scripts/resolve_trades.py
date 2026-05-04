@@ -30,6 +30,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from clients.kalshi import KalshiClient, KalshiAPIError
 from config.settings import SQLITE_DB_PATH, STARTING_CAPITAL_USD
+from scripts._display import print_resolve_summary
 
 log = logging.getLogger("resolve_trades")
 
@@ -39,15 +40,35 @@ log = logging.getLogger("resolve_trades")
 
 MIGRATION_SQL = """
 -- Resolution columns (added if not present)
-ALTER TABLE sports_paper_trades ADD COLUMN outcome          TEXT DEFAULT 'open';
-ALTER TABLE sports_paper_trades ADD COLUMN actual_profit    REAL DEFAULT NULL;
-ALTER TABLE sports_paper_trades ADD COLUMN resolved_at      TEXT DEFAULT NULL;
-ALTER TABLE sports_paper_trades ADD COLUMN bankroll_after   REAL DEFAULT NULL;
-ALTER TABLE sports_paper_trades ADD COLUMN strategy_version TEXT DEFAULT 'v1';
+ALTER TABLE sports_paper_trades ADD COLUMN outcome              TEXT DEFAULT 'open';
+ALTER TABLE sports_paper_trades ADD COLUMN actual_profit        REAL DEFAULT NULL;
+ALTER TABLE sports_paper_trades ADD COLUMN resolved_at          TEXT DEFAULT NULL;
+ALTER TABLE sports_paper_trades ADD COLUMN bankroll_after       REAL DEFAULT NULL;
+ALTER TABLE sports_paper_trades ADD COLUMN strategy_version     TEXT DEFAULT 'v1';
 
--- Bankroll tracker (one row, updated in place)
+-- CLV (Closing Line Value) columns — proof that edge is real, not luck.
+-- Captured at the moment of settlement fetch.
+-- clv > 0: market moved in our favor after entry (confirms edge).
+-- clv < 0: market moved against us (noise signal).
+ALTER TABLE sports_paper_trades ADD COLUMN kalshi_closing_ask    REAL DEFAULT NULL;
+ALTER TABLE sports_paper_trades ADD COLUMN kalshi_closing_no_ask REAL DEFAULT NULL;
+ALTER TABLE sports_paper_trades ADD COLUMN clv                   REAL DEFAULT NULL;
+
+-- Global bankroll tracker (one row, updated in place)
 CREATE TABLE IF NOT EXISTS bankroll (
     id              INTEGER PRIMARY KEY CHECK (id = 1),
+    starting_capital REAL    NOT NULL,
+    current_capital  REAL    NOT NULL,
+    total_trades     INTEGER NOT NULL DEFAULT 0,
+    wins             INTEGER NOT NULL DEFAULT 0,
+    losses           INTEGER NOT NULL DEFAULT 0,
+    total_profit     REAL    NOT NULL DEFAULT 0.0,
+    last_updated     TEXT    NOT NULL
+);
+
+-- Per-strategy bankroll tracker (one row per strategy)
+CREATE TABLE IF NOT EXISTS strategy_bankrolls (
+    strategy_name    TEXT PRIMARY KEY,
     starting_capital REAL    NOT NULL,
     current_capital  REAL    NOT NULL,
     total_trades     INTEGER NOT NULL DEFAULT 0,
@@ -99,7 +120,7 @@ def get_or_init_bankroll(conn: sqlite3.Connection, starting: float) -> dict:
 
 
 def update_bankroll(conn: sqlite3.Connection, profit: float, won: bool):
-    """Increment bankroll after a trade settles."""
+    """Increment global bankroll after a trade settles."""
     conn.execute("""
         UPDATE bankroll SET
             current_capital = current_capital + ?,
@@ -115,6 +136,51 @@ def update_bankroll(conn: sqlite3.Connection, profit: float, won: bool):
         0 if won else 1,
         datetime.now(timezone.utc).isoformat(),
     ))
+    conn.commit()
+
+
+def update_strategy_bankroll(conn: sqlite3.Connection, strategy: str,
+                              profit: float, won: bool, starting: float):
+    """Upsert per-strategy bankroll row after a trade settles."""
+    now = datetime.now(timezone.utc).isoformat()
+    existing = conn.execute(
+        "SELECT * FROM strategy_bankrolls WHERE strategy_name=?", (strategy,)
+    ).fetchone()
+    if existing:
+        conn.execute("""
+            UPDATE strategy_bankrolls SET
+                current_capital = current_capital + ?,
+                total_profit    = total_profit    + ?,
+                total_trades    = total_trades    + 1,
+                wins            = wins   + ?,
+                losses          = losses + ?,
+                last_updated    = ?
+            WHERE strategy_name = ?
+        """, (profit, profit,
+              1 if won else 0, 0 if won else 1,
+              now, strategy))
+    else:
+        # First settlement for this strategy — seed from all prior resolved trades
+        settled = conn.execute(
+            "SELECT COALESCE(SUM(actual_profit), 0) FROM sports_paper_trades "
+            "WHERE outcome IN ('won','lost') AND strategy_version=?",
+            (strategy,)
+        ).fetchone()[0] or 0.0
+        wins_ct = conn.execute(
+            "SELECT COUNT(*) FROM sports_paper_trades "
+            "WHERE outcome='won' AND strategy_version=?", (strategy,)
+        ).fetchone()[0]
+        loss_ct = conn.execute(
+            "SELECT COUNT(*) FROM sports_paper_trades "
+            "WHERE outcome='lost' AND strategy_version=?", (strategy,)
+        ).fetchone()[0]
+        conn.execute("""
+            INSERT INTO strategy_bankrolls
+                (strategy_name, starting_capital, current_capital,
+                 total_trades, wins, losses, total_profit, last_updated)
+            VALUES (?,?,?,?,?,?,?,?)
+        """, (strategy, starting, starting + settled,
+              wins_ct + loss_ct, wins_ct, loss_ct, settled, now))
     conn.commit()
 
 
@@ -160,6 +226,7 @@ def resolve_all(dry_run: bool = False, verbose: bool = False):
     losses = 0
     total_profit = 0.0
     still_open = 0
+    stale_count = 0
     errors = 0
 
     for trade in open_trades:
@@ -170,8 +237,37 @@ def resolve_all(dry_run: bool = False, verbose: bool = False):
         cost_per  = trade["cost_per_contr"]
 
         try:
-            resolved, result = kalshi.is_market_resolved(ticker)
+            # Use get_market directly so we capture closing prices in one call
+            raw      = kalshi.get_market(ticker)
+            market   = raw.get("market", raw)
+            status   = (market.get("status") or "").lower()
+            result   = (market.get("result") or "").lower() or None
+            resolved = status in ("settled", "finalized") and result in ("yes", "no")
+
+            # Capture closing prices for CLV computation
+            closing_yes_ask = market.get("yes_ask_dollars") or market.get("yes_ask")
+            closing_no_ask  = market.get("no_ask_dollars")  or market.get("no_ask")
+            try:
+                closing_yes_ask = float(closing_yes_ask) if closing_yes_ask is not None else None
+                closing_no_ask  = float(closing_no_ask)  if closing_no_ask  is not None else None
+            except (TypeError, ValueError):
+                closing_yes_ask = closing_no_ask = None
+
         except KalshiAPIError as e:
+            if e.status_code == 404:
+                # Market no longer exists on Kalshi — delisted or expired without
+                # resolution. Mark as 'stale' so it stops blocking the open count.
+                print(f"  [STALE] {ticker[:48]} — market not found (404), marking stale")
+                stale_count += 1
+                if not dry_run:
+                    now = datetime.now(timezone.utc).isoformat()
+                    conn.execute(
+                        "UPDATE sports_paper_trades SET outcome='stale', "
+                        "resolved_at=? WHERE id=?",
+                        (now, trade["id"]),
+                    )
+                    conn.commit()
+                continue
             if verbose:
                 print(f"  [!] {ticker[:50]} — API error: {e}")
             errors += 1
@@ -197,6 +293,17 @@ def resolve_all(dry_run: bool = False, verbose: bool = False):
         else:
             actual_profit = -stake
 
+        # CLV = closing_ask - entry_ask for the traded side.
+        # Positive → market moved in our favor after entry (confirms edge).
+        # Negative → market moved against us.
+        entry_ask = trade["kalshi_ask"]
+        if side == "yes" and closing_yes_ask is not None:
+            clv = closing_yes_ask - entry_ask
+        elif side == "no" and closing_no_ask is not None:
+            clv = closing_no_ask - entry_ask
+        else:
+            clv = None
+
         current_bankroll += actual_profit
         total_profit     += actual_profit
         settled_count    += 1
@@ -207,32 +314,43 @@ def resolve_all(dry_run: bool = False, verbose: bool = False):
 
         outcome_str = "WON " if won else "LOST"
         marker      = "+" if won else "-"
+        clv_str     = f"  clv={clv:+.3f}" if clv is not None else ""
         print(
             f"  [{outcome_str}] {ticker[:48]:<48}  "
             f"side={side.upper()}  result={str(result).upper():<3}  "
-            f"{marker}${abs(actual_profit):.2f}"
+            f"{marker}${abs(actual_profit):.2f}{clv_str}"
         )
 
         if not dry_run:
             now = datetime.now(timezone.utc).isoformat()
             conn.execute(
                 "UPDATE sports_paper_trades SET outcome=?, actual_profit=?, "
-                "resolved_at=?, bankroll_after=? WHERE id=?",
+                "resolved_at=?, bankroll_after=?, "
+                "kalshi_closing_ask=?, kalshi_closing_no_ask=?, clv=? "
+                "WHERE id=?",
                 (
                     "won" if won else "lost",
                     actual_profit,
                     now,
                     current_bankroll,
+                    closing_yes_ask,
+                    closing_no_ask,
+                    clv,
                     trade["id"],
                 ),
             )
             conn.commit()
             update_bankroll(conn, actual_profit, won)
+            strategy_ver = trade["strategy_version"] or "v1"
+            update_strategy_bankroll(conn, strategy_ver, actual_profit, won,
+                                     STARTING_CAPITAL_USD)
 
     # Summary
     print()
     print(f"  Settled:    {settled_count}  ({wins} won, {losses} lost)")
     print(f"  Still open: {still_open}")
+    if stale_count:
+        print(f"  Stale:      {stale_count}  (market delisted/expired — stake written off)")
     if errors:
         print(f"  Errors:     {errors}  (check Kalshi API connection)")
     if settled_count:
@@ -365,20 +483,26 @@ def _print_bankroll(conn: sqlite3.Connection):
         print()
         return
     r = dict(row)
-    pnl      = r["current_capital"] - r["starting_capital"]
-    pnl_pct  = pnl / r["starting_capital"] * 100
-    win_rate = (r["wins"] / r["total_trades"] * 100) if r["total_trades"] else 0
 
-    print(f"  -- Bankroll --------------------------------------------------")
-    print(f"  Starting:       ${r['starting_capital']:>10,.2f}")
-    print(f"  Current:        ${r['current_capital']:>10,.2f}  "
-          f"({'+'if pnl>=0 else ''}{pnl_pct:.1f}%)")
-    print(f"  Realised P&L:   {'+'if pnl>=0 else ''}${pnl:>9.2f}")
-    print(f"  Settled trades: {r['total_trades']:>10}  "
-          f"({r['wins']} won / {r['losses']} lost"
-          + (f"  |  {win_rate:.0f}% win rate" if r['total_trades'] else "")
-          + ")")
-    print(f"  Last updated:   {r['last_updated'][:19]}")
+    # Per-strategy breakdown rows
+    strat_rows = []
+    try:
+        rows = conn.execute(
+            "SELECT * FROM strategy_bankrolls ORDER BY strategy_name"
+        ).fetchall()
+        strat_rows = [dict(x) for x in rows]
+    except sqlite3.OperationalError:
+        pass
+
+    print_resolve_summary(
+        starting=r["starting_capital"],
+        current=r["current_capital"],
+        total_trades=r["total_trades"],
+        wins=r["wins"],
+        losses=r["losses"],
+        last_updated=r["last_updated"],
+        per_strategy_rows=strat_rows or None,
+    )
     print()
 
 

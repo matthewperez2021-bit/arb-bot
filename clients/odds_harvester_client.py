@@ -47,6 +47,8 @@ from config.settings import (
     ODDS_HARVESTER_CACHE_PATH,
     ODDS_HARVESTER_REFRESH_SECS,
     ODDS_HARVESTER_SPORT_MAP,
+    ODDS_HARVESTER_HISTORICAL_DIR,
+    SHARP_BOOK_WEIGHTS,
 )
 
 log = logging.getLogger(__name__)
@@ -84,6 +86,20 @@ def _devig(probs: list[float]) -> list[float]:
     if total <= 0:
         return probs
     return [p / total for p in probs]
+
+
+def _book_weight(bookmaker_name: str) -> float:
+    """
+    Return the weight for a bookmaker when averaging devigged probabilities.
+
+    Pinnacle and sharp European books are weighted higher because their lines
+    historically close closest to the true probability.
+    """
+    name = bookmaker_name.lower()
+    for key, weight in SHARP_BOOK_WEIGHTS.items():
+        if key in name:
+            return weight
+    return SHARP_BOOK_WEIGHTS.get("default", 1.0)
 
 
 def _parse_1x2_market(market_entries: list[dict]) -> list[dict]:
@@ -165,16 +181,17 @@ def _build_team_entries(match: dict, sport: str) -> list[dict]:
     if not parsed:
         return []
 
-    # Average devigged probability across all bookmakers
-    home_probs = [e["home_prob"] for e in parsed]
-    away_probs = [e["away_prob"] for e in parsed]
+    # Weighted average devigged probability — sharp books (Pinnacle, Bet365)
+    # contribute more to the consensus than recreational books.
+    weights    = [_book_weight(e["bookmaker"]) for e in parsed]
+    total_w    = sum(weights)
     n_books    = len(parsed)
 
     if n_books < MIN_BOOKS_REQUIRED:
         return []
 
-    avg_home = sum(home_probs) / n_books
-    avg_away = sum(away_probs) / n_books
+    avg_home = sum(w * e["home_prob"] for w, e in zip(weights, parsed)) / total_w
+    avg_away = sum(w * e["away_prob"] for w, e in zip(weights, parsed)) / total_w
 
     # ISO commence time from match_date string ("2026-05-02 15:00:00 UTC")
     raw_date = match.get("match_date", "")
@@ -319,6 +336,7 @@ class OddsHarvesterClient:
             )
 
         self._save_cache(cache)
+        self._archive_snapshot(cache, target_sports, date_str)
         log.info("OddsHarvester: cache built (%d teams)", len(cache))
         return cache
 
@@ -388,6 +406,58 @@ class OddsHarvesterClient:
                 json.dump({"_ts": time.time(), "cache": cache}, f)
         except Exception as exc:
             log.warning("OddsHarvester: failed to save cache: %s", exc)
+
+    def _archive_snapshot(self, cache: dict, sports: list[str], date_str: str) -> None:
+        """
+        Write a timestamped snapshot to data/historical_odds/{date}/.
+
+        Snapshots accumulate over time and enable:
+          - Backtesting against real historical lines
+          - Seeing how probability estimates moved day-to-day
+          - Calibration of the devig model over time
+
+        File naming: {sport}_{date}_{HHMM}.json
+        e.g. data/historical_odds/2026-05-04/nba_20260504_1400.json
+        """
+        if not cache:
+            return
+
+        now      = datetime.now()
+        date_dir = os.path.join(ODDS_HARVESTER_HISTORICAL_DIR, now.strftime("%Y-%m-%d"))
+        hhmm     = now.strftime("%H%M")
+
+        try:
+            os.makedirs(date_dir, exist_ok=True)
+        except Exception as exc:
+            log.warning("OddsHarvester: could not create snapshot dir: %s", exc)
+            return
+
+        # Split cache by sport for easier per-sport loading
+        sport_buckets: dict = {}
+        for team_norm, entry in cache.items():
+            sport = entry.get("sport", "unknown")
+            sport_buckets.setdefault(sport, {})[team_norm] = entry
+
+        for sport, bucket in sport_buckets.items():
+            fname = f"{sport}_{date_str}_{hhmm}.json"
+            fpath = os.path.join(date_dir, fname)
+            try:
+                with open(fpath, "w", encoding="utf-8") as f:
+                    json.dump({
+                        "_ts":     time.time(),
+                        "date":    date_str,
+                        "sport":   sport,
+                        "teams":   len(bucket),
+                        "cache":   bucket,
+                    }, f)
+                log.debug("OddsHarvester: snapshot saved → %s (%d teams)", fpath, len(bucket))
+            except Exception as exc:
+                log.warning("OddsHarvester: failed to write snapshot %s: %s", fpath, exc)
+
+        log.info(
+            "OddsHarvester: archived snapshot for %d sports → %s",
+            len(sport_buckets), date_dir,
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

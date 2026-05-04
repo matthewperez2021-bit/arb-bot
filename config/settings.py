@@ -176,7 +176,7 @@ LLM_MAX_TOKENS      = 300
 # Set ODDS_HARVESTER_ENABLED=True after running: pip install oddsharvester
 # then: playwright install chromium
 # ─────────────────────────────────────────────────────────────────────
-ODDS_HARVESTER_ENABLED        = False   # opt-in; requires Playwright install
+ODDS_HARVESTER_ENABLED        = True    # requires: pip install oddsharvester && python -m playwright install chromium
 ODDS_HARVESTER_REFRESH_SECS   = 7200   # re-scrape every 2 hours (batch, slow)
 ODDS_HARVESTER_CACHE_PATH     = "data/harvester_cache.json"
 ODDS_HARVESTER_HISTORICAL_DIR = "data/historical_odds/"
@@ -191,4 +191,28 @@ ODDS_HARVESTER_SPORT_MAP: dict = {
     "mls":          "football",      # OddsHarvester uses "football" for soccer
     "tennis_atp":   "tennis",
     "tennis_wta":   "tennis",
+}
+
+# Sharp book weights for OddsHarvester devig.
+# Pinnacle and sharp European books close closest to true probability.
+# Keys are lowercase substrings matched against bookmaker_name.
+SHARP_BOOK_WEIGHTS: dict = {
+    "pinnacle":  2.0,   # sharpest book globally — weight double
+    "bet365":    1.5,   # sharp European reference book
+    "default":   1.0,   # recreational books (DraftKings, FanDuel, etc.)
+}
+
+# ─────────────────────────────────────────────────────────────────────
+# CALIBRATION OVERRIDES
+# Populated from calibration_report.py when a bucket shows systematic
+# over/under-estimation. Applied as a multiplier on Kelly fraction.
+#
+# Format: {"sport__bucket": calibration_factor}
+# e.g. {"mlb__4-6%": 0.72} means our 4-6% MLB edge estimates are
+# 28% too optimistic → Kelly sized at 72% of the calculated value.
+#
+# Leave empty until you have 20+ settled trades per bucket.
+# ─────────────────────────────────────────────────────────────────────
+CALIBRATION_OVERRIDES: dict = {
+    # "mlb__0-2%":   1.00,   # example — fill from calibration_report.py
 }
