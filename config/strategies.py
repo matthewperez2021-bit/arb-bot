@@ -65,11 +65,15 @@ STRATEGIES: Dict[str, Strategy] = {
     ),
     "v2": Strategy(
         name="v2",
-        created_at="2026-05-01",
+        created_at="2026-05-04",                # redefined before any v2 trades placed
         notes=(
-            "Quality filters across all sports: cap parlays at 3 legs, "
-            "discard 'too good to be true' edges >12%, raise min edge to 4%. "
-            "(NBA/NHL exclusion lifted — v2 had 0 trades; not enough data to justify.)"
+            "Quality filters tightened from v1 calibration analysis (90 settled trades): "
+            "min edge 4%, max edge 8% (12%+ bucket showed -33% ROI / CalibF 0.56 — "
+            "apparent edges above 8% are model error, not real opportunities), "
+            "cap parlays at 3 legs (correlation gets unreliable past 3), "
+            "exclude NBA/NHL (CalibF 0.68/0.57, ROI -47%/-46% in v1 data), "
+            "min 2 books for fair_prob. Edge-accuracy work in same commit: "
+            "same-game correlation uplift + totals leg pricing."
         ),
         min_net_edge=0.04,
         max_per_trade_usd=50.0,
@@ -77,8 +81,11 @@ STRATEGIES: Dict[str, Strategy] = {
         kelly_fraction=0.5,
         min_books=2,
         max_legs=3,
-        max_trusted_edge_pct=12.0,
-        excluded_sports=frozenset(),
+        max_trusted_edge_pct=8.0,                 # tightened from 12 -> 8
+        excluded_sports=frozenset({                # re-added based on calibration data
+            "basketball_nba",
+            "icehockey_nhl",
+        }),
         allowed_sides=frozenset({"yes", "no"}),
     ),
     "v3": Strategy(
