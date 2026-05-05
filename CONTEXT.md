@@ -92,6 +92,24 @@ python scripts/view_trades.py --session latest                # detail of most r
 python scripts/view_trades.py --all                           # every trade, newest first
 ```
 
+### Sync between machines (single-writer)
+The trade DB (`data/arb_positions.db`) is tracked in git as of commit `22c9082` so trade history transfers across machines. **Only one machine writes at a time** — SQLite doesn't merge.
+
+```powershell
+# On the machine that will run the bot — pull latest before running
+git pull
+
+# After a scan/resolve session, push so the other machine stays current
+git add data/arb_positions.db
+git commit -m "trades: <short summary>"
+git push
+```
+
+What's tracked: `data/arb_positions.db` only.
+What's NOT tracked (regenerable): `*.log`, `harvester_cache.json`, `historical_odds/`, `player_prop_cache.json`, `snapshots/`, `*.db-shm`, `*.db-wal`, `arb_positions.db.bak`.
+
+To recover trade history on a fresh clone: `git pull` is enough — no import step.
+
 ### Analyze
 ```powershell
 python scripts/analyze_performance.py                         # all-strategies slice breakdown
