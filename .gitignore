@@ -5,11 +5,12 @@ config/Arg-bot.txt
 *.key
 *.p8
 
-# Database
-data/*.db
+# Database — track arb_positions.db so trade history syncs across machines.
+# Ignore SQLite sidecar/WAL files and the local backup.
 data/*.db-shm
 data/*.db-wal
 data/*.sqlite
+data/arb_positions.db.bak
 
 # Python
 __pycache__/
@@ -38,3 +39,4 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+.fuse_hidden*

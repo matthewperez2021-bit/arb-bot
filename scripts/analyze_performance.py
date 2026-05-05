@@ -30,7 +30,7 @@ def fetch_settled():
     return [dict(r) for r in rows]
 
 
-def bucket_stats(trades, key_fn, label):
+def bucket_stats(trades, key_fn, label, min_settled=1):
     """Group trades by key_fn(t) and print W/L/ROI per bucket."""
     buckets = defaultdict(list)
     for t in trades:
@@ -39,20 +39,24 @@ def bucket_stats(trades, key_fn, label):
     print()
     print(f"  -- By {label} " + "-" * (50 - len(label)))
     print(f"  {label:<22} {'N':>4} {'W':>3} {'L':>3} {'Win%':>5}  "
-          f"{'Stake':>8}  {'P&L':>9}  {'ROI':>6}")
-    print("  " + "-" * 70)
+          f"{'Stake':>8}  {'P&L':>9}  {'ROI':>6}  {'ExpROI':>7}")
+    print("  " + "-" * 80)
 
     for k in sorted(buckets.keys(), key=lambda x: str(x)):
         ts = buckets[k]
         n  = len(ts)
+        if n < min_settled:
+            continue
         w  = sum(1 for t in ts if t["outcome"] == "won")
         l  = n - w
-        stake = sum(t["total_stake"] for t in ts)
-        pnl   = sum(t["actual_profit"] or 0 for t in ts)
-        wr  = w / n * 100 if n else 0
-        roi = pnl / stake * 100 if stake else 0
+        stake  = sum(t["total_stake"] for t in ts)
+        pnl    = sum(t["actual_profit"] or 0 for t in ts)
+        exp    = sum(t["expected_profit"] or 0 for t in ts)
+        wr     = w / n * 100 if n else 0
+        roi    = pnl / stake * 100 if stake else 0
+        exproi = exp / stake * 100 if stake else 0
         print(f"  {str(k):<22} {n:>4} {w:>3} {l:>3} {wr:>4.0f}%  "
-              f"${stake:>7.2f}  ${pnl:>+8.2f}  {roi:>+5.1f}%")
+              f"${stake:>7.2f}  ${pnl:>+8.2f}  {roi:>+5.1f}%  {exproi:>+6.1f}%")
 
 
 def edge_bucket(t):
@@ -87,6 +91,15 @@ def legs_bucket(t):
     return f"{n} legs"
 
 
+def hour_bucket(t):
+    try:
+        from datetime import datetime
+        dt = datetime.fromisoformat(t["opened_at"].replace("Z", "+00:00"))
+        return f"{dt.hour:02d}:00 UTC"
+    except Exception:
+        return "unknown"
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(
@@ -94,7 +107,10 @@ def main():
     )
     parser.add_argument("--version", type=str, default=None,
                         help="Restrict report to one strategy version (e.g. v1)")
+    parser.add_argument("--min-settled", type=int, default=3,
+                        help="Hide groups with fewer than N settled trades (default: 3)")
     args = parser.parse_args()
+    ms = args.min_settled
 
     trades = fetch_settled()
     if not trades:
@@ -107,32 +123,45 @@ def main():
             print(f"  No settled trades for strategy '{args.version}'.")
             return
 
-    n   = len(trades)
-    w   = sum(1 for t in trades if t["outcome"] == "won")
-    l   = n - w
+    n     = len(trades)
+    w     = sum(1 for t in trades if t["outcome"] == "won")
+    l     = n - w
     stake = sum(t["total_stake"] for t in trades)
     pnl   = sum(t["actual_profit"] or 0 for t in trades)
+    exp   = sum(t["expected_profit"] or 0 for t in trades)
     label = f"strategy={args.version}" if args.version else "all strategies"
+
     print()
     print(f"  ============= PERFORMANCE BREAKDOWN ({n} settled trades, {label}) =============")
     print(f"  Overall: {w}W / {l}L = {w/n*100:.0f}% win rate  |  "
           f"P&L ${pnl:+.2f} on ${stake:.2f} deployed = {pnl/stake*100:+.1f}% ROI")
+    print(f"  Expected P&L: ${exp:+.2f}  |  Realised/Expected: {pnl/exp*100:.0f}%"
+          if exp else "")
 
     # Show per-version breakdown FIRST when looking at the full set
     if not args.version:
-        bucket_stats(trades, lambda t: t.get("strategy_version") or "?", "Strategy version")
-    bucket_stats(trades, lambda t: t["kalshi_side"].upper(),       "Side (YES/NO)")
-    bucket_stats(trades, lambda t: t["sport"] or "?",              "Sport")
-    bucket_stats(trades, edge_bucket,                              "Edge size")
-    bucket_stats(trades, lambda t: f"{t['books_used']} books",     "Books used")
-    bucket_stats(trades, legs_bucket,                              "# Legs")
-    bucket_stats(trades, cost_bucket,                              "Cost per contract")
-    bucket_stats(trades, stake_bucket,                             "Stake size")
+        bucket_stats(trades, lambda t: t.get("strategy_version") or "?",
+                     "Strategy version", ms)
+    bucket_stats(trades, lambda t: t["kalshi_side"].upper(),       "Side (YES/NO)", ms)
+    bucket_stats(trades, lambda t: t["sport"] or "?",              "Sport", ms)
+    bucket_stats(trades, edge_bucket,                              "Edge size", ms)
+    bucket_stats(trades, lambda t: f"{t['books_used']} books",     "Books used", ms)
+    bucket_stats(trades, legs_bucket,                              "# Legs", ms)
+    bucket_stats(trades, cost_bucket,                              "Cost per contract", ms)
+    bucket_stats(trades, stake_bucket,                             "Stake size", ms)
+    bucket_stats(trades, hour_bucket,                              "Hour opened (UTC)", ms)
+
+    # Strategy × sport cross-tab
+    bucket_stats(trades,
+                 lambda t: f"{t.get('strategy_version') or 'v1'} / {t['sport'] or '?'}",
+                 "Strategy / Sport", ms)
 
     print()
-    print("  Tip: any slice with negative ROI is a candidate to filter out.")
-    print("       Any slice with high N + positive ROI is your real edge.")
-    print(f"       Use --version v2 to drill into a single strategy.")
+    print("  Tips:")
+    print("  - Any slice with negative ROI + high N is a candidate filter to add to v2/v3.")
+    print("  - ExpROI shows what the model predicted — a large gap means mis-calibration.")
+    print("  - Use --version v2 to drill into a single strategy.")
+    print(f"  - Use --min-settled N to show groups with at least N trades (currently {ms}).")
     print()
 
 
