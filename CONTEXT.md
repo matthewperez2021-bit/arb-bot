@@ -117,6 +117,56 @@ python scripts/backtest.py --mode strategy-replay --strategies v2,v4 --verbose
 - In-progress games' lines freeze; their snapshot consensus probs reflect score, not pre-game truth. Filter on `commence_time > snapshot_iso` for clean training data.
 - Strategy-replay uses each trade's recorded `fair_prob` and `net_edge` — it doesn't yet re-derive `fair_prob` from a matching Odds API snapshot at `opened_at`. Adding that requires parsing each KXMVE title via `KXMVEParser` and pricing legs from the snapshot — same pipeline the live scanner runs. Worth doing once seeded snapshots overlap settled-trade timestamps.
 
+### Automation (Windows Scheduled Tasks)
+Both seeders run nightly via Windows Task Scheduler so historical data accumulates without manual intervention. Set up ONCE on the bot-hosting machine:
+
+```powershell
+git pull
+.\scripts\setup_scheduled_tasks.ps1                          # registers both tasks
+```
+
+Tasks created:
+| Name                    | Schedule       | Action                                                      | Cost         |
+|-------------------------|----------------|-------------------------------------------------------------|--------------|
+| `ArbBot-Seed-OddsAPI`   | Daily 02:00    | `python scripts/seed_odds_api_historical.py --max-snapshots 12` | ~120 quota/day (under 20K monthly) |
+| `ArbBot-Seed-Kalshi`    | Daily 02:30    | `python scripts/seed_kalshi_historical.py --from-trades`        | Free (Kalshi reads not metered) |
+
+Per-task stdout/stderr is appended to `data/scheduled_tasks/{TaskName}.log` for diagnostics.
+
+`resolve_trades.py` is intentionally NOT scheduled separately — `sports_scheduler.py` already runs it at the top of every 20-minute scan.
+
+**Verify registration:**
+```powershell
+Get-ScheduledTask -TaskName "ArbBot-*" | Select-Object TaskName, State, @{N="NextRun";E={(Get-ScheduledTaskInfo $_).NextRunTime}}
+```
+
+**Re-run safe (idempotent):** the script uses `-Force` so re-running with changed schedules just overwrites the old definitions.
+
+**Remove later:**
+```powershell
+.\scripts\setup_scheduled_tasks.ps1 -Remove
+```
+
+**Switching machines:** the tasks live in Windows Task Scheduler, NOT in git. After moving the bot to a new machine, run the setup script again on the new one and `-Remove` on the old one. Otherwise both will fire and duplicate-fetch.
+
+### Inspecting scheduler output
+The bot writes `data/sports_scheduler.log` in UTF-8 with Unicode box-drawing borders from Rich. PowerShell defaults to Windows-1252 reading, which mangles them. Use the helper instead of raw `Get-Content`:
+
+```powershell
+.\scripts\view-log.ps1                            # last 100 lines, default filter
+.\scripts\view-log.ps1 -Tail 300                  # last 300 lines
+.\scripts\view-log.ps1 -Tail 200 -Match "v2|v4"   # custom regex
+.\scripts\view-log.ps1 -All -Match ""             # full file, no filter
+```
+
+Default filter matches `STRATEGY|filters dropped|Trades placed|Run #` — the lines you care about for tracking what each strategy is doing per scan.
+
+### Diagnostic queries
+```powershell
+# Trades placed since a given timestamp, grouped by strategy
+python -c "import sqlite3; c=sqlite3.connect('data/arb_positions.db'); print('Since 2026-05-06 17:00:'); [print(' ',r) for r in c.execute(\"SELECT strategy_version, COUNT(*) FROM sports_paper_trades WHERE opened_at > '2026-05-06T17:00:00' GROUP BY strategy_version\").fetchall()]"
+```
+
 ### Settle / resolve
 ```powershell
 python scripts/resolve_trades.py                              # check Kalshi for settlements
