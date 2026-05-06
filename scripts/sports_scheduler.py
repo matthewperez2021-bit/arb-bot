@@ -69,11 +69,17 @@ def main():
             logf.write(f"Run #{run_number} at {now}\n")
             logf.write(f"{'='*70}\n")
 
+            # Subprocess env: disable Rich/colorama ANSI output so the log
+            # file stays plain-text and grep-friendly. (Rich and most CLI
+            # color libs respect NO_COLOR per https://no-color.org.)
+            child_env = {**os.environ, "NO_COLOR": "1", "TERM": "dumb"}
+
             # Step 1: settle any open trades first
             resolve = subprocess.run(
                 [sys.executable, "scripts/resolve_trades.py"],
                 capture_output=True, text=True,
                 encoding="utf-8", errors="replace",
+                env=child_env,
             )
             logf.write("[resolve_trades]\n")
             logf.write(resolve.stdout)
@@ -89,6 +95,7 @@ def main():
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                env=child_env,
             )
 
             logf.write(result.stdout)
