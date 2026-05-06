@@ -1191,10 +1191,11 @@ def main():
               f"(combined max exposure: ${total_max_exposure:,.2f})\n")
 
         # shared_data: Kalshi + Odds API data fetched once, reused by all passes.
-        # taken_tickers: tickers already traded this scan — prevents doubling up.
+        # taken_tickers intentionally NOT shared — each strategy places
+        # independently against its own bankroll, even if v1 already grabbed
+        # the same ticker. Duplicates across strategies are allowed by design.
         # summaries: per-strategy results collected for the end-of-scan dashboard.
         shared_data   = {}
-        taken_tickers = set()
         summaries: dict = {}
         for s in strategies:
             run_paper_test(
@@ -1202,7 +1203,7 @@ def main():
                 strategy      = s,
                 verbose       = args.verbose,
                 shared_data   = shared_data,
-                taken_tickers = taken_tickers,
+                taken_tickers = None,
                 summaries     = summaries,
             )
 
