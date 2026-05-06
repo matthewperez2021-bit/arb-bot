@@ -95,16 +95,27 @@ python scripts/seed_kalshi_historical.py --period 1                 # minute-res
 Writes per-ticker candle files to `data/historical_kalshi/{ticker}.json`. Default period is hourly. Skips files already on disk unless `--overwrite`. `--from-trades` mode auto-derives the window per ticker from `opened_at`/`resolved_at` (with `--pad-hours` padding).
 
 ### Backtest replay (offline)
+Two modes — `--mode timeline` (default) and `--mode strategy-replay`.
+
 ```powershell
-python scripts/backtest.py                                    # all sports on disk
+# timeline: consensus drift across snapshots
+python scripts/backtest.py                                    # all sports
 python scripts/backtest.py --sport mlb                        # one sport
 python scripts/backtest.py --sport mlb,nba --csv              # combined CSV export
+
+# strategy-replay: would v1/v2/v3/v4 each have placed each settled trade?
+python scripts/backtest.py --mode strategy-replay             # all 4 strategies
+python scripts/backtest.py --mode strategy-replay --enrich    # use Kalshi candles for entry price
+python scripts/backtest.py --mode strategy-replay --strategies v2,v4 --verbose
 ```
-Reads seeded Odds API snapshots, devigs each event, prints summary (snapshot count, books/event, home_prob drift). With `--csv`, writes `data/backtest_timeline.csv`. Pure offline replay — no API calls, no quota cost.
+
+**Strategy-replay output** (per strategy): trades placed, won, lost, total stake, P&L, ROI, win rate. With `--verbose`, also prints rejection-reason breakdown. With `--enrich`, attempts to read seeded Kalshi candles to derive an actual entry price near `opened_at`; falls back to the trade's recorded `kalshi_ask`. Reports candle-coverage % so you know how much of the analysis used real candles vs. recorded prices.
+
+**Sample first-run finding (90 settled trades):** v2's tighter filters placed only 4 trades but won 3 — empirical confirmation the 4-8% edge band + NBA/NHL exclusion + 3-leg cap is doing real work, not just dropping volume.
 
 **Limitations:**
-- Lines for in-progress games freeze; their consensus probs reflect the score, not pre-game truth. Filter on `commence_time > snapshot_iso` for clean training data.
-- `backtest.py` currently consumes only the Odds API side. To run a full v1/v2/v3/v4 strategy P&L replay, it needs to also consume `data/historical_kalshi/*.json` (seeded by `seed_kalshi_historical.py`) and join them on `(timestamp, event_id)`. That join is the next build step.
+- In-progress games' lines freeze; their snapshot consensus probs reflect score, not pre-game truth. Filter on `commence_time > snapshot_iso` for clean training data.
+- Strategy-replay uses each trade's recorded `fair_prob` and `net_edge` — it doesn't yet re-derive `fair_prob` from a matching Odds API snapshot at `opened_at`. Adding that requires parsing each KXMVE title via `KXMVEParser` and pricing legs from the snapshot — same pipeline the live scanner runs. Worth doing once seeded snapshots overlap settled-trade timestamps.
 
 ### Settle / resolve
 ```powershell
@@ -298,11 +309,12 @@ now meaningful for both sides.
 
 ## Open Roadmap Items (not yet built)
 
-- **Wire Kalshi history into `backtest.py`** — both seeders now exist
-  (`seed_odds_api_historical.py` for sportsbook lines, `seed_kalshi_historical.py`
-  for KXMVE candles). Next step: extend `backtest.py` to join the two on
-  `(timestamp, event_id)` so it can replay each strategy's filter + sizing
-  decisions against real historical prices and emit a per-strategy P&L curve.
+- **Snapshot-based fair_prob enrichment in strategy-replay** — currently
+  `--mode strategy-replay` uses each trade's recorded `fair_prob`. To re-derive
+  it from the matching Odds API snapshot at `opened_at`, parse the trade's
+  KXMVE title via `KXMVEParser`, price each team_win leg from the snapshot,
+  and apply the same-game correlation uplift. This unlocks "what if our
+  pricing model had been different?" analysis on top of the strategy comparison.
 - **CALIBRATION_OVERRIDES** in settings.py — placeholder dict; populate from
   calibration_report.py findings to apply Kelly multipliers per sport/bucket.
 - **Player→event mapping** — currently player_over legs don't get an event_id,
