@@ -171,7 +171,8 @@ def print_resolve_summary(starting: float, current: float,
 def print_scan_dashboard(scan_label: str, mode: str, main_current: float,
                           main_starting: float, main_settled: int,
                           main_wins: int, main_losses: int,
-                          per_strategy: List[Dict]) -> None:
+                          per_strategy: List[Dict],
+                          main_open: int = 0) -> None:
     """
     End-of-scan unified dashboard. Always prints — used as the
     grep target by sports_scheduler.py for console output.
@@ -191,6 +192,7 @@ def print_scan_dashboard(scan_label: str, mode: str, main_current: float,
         print(f"  |  SCAN DASHBOARD  -  {scan_label:<46}|")
         print(f"  |  Mode: {mode}  |  Main bankroll: ${main_current:,.2f}  "
               f"({'+'if pnl>=0 else ''}{pnl_pct:.1f}%)  |  "
+              f"Open: {main_open}  |  "
               f"Settled: {main_settled} ({main_wr:.0f}% WR)" + " " * 5 + "|")
         print("  +" + "=" * 70 + "+")
         for s in per_strategy:
@@ -211,6 +213,9 @@ def print_scan_dashboard(scan_label: str, mode: str, main_current: float,
         (" (", ""),
         Text.from_markup(_color_pct(pnl_pct)),
         (")    ", ""),
+        ("Open: ", "dim"),
+        (f"{main_open}", "bold cyan" if main_open > 0 else "bold"),
+        ("    ", ""),
         ("Settled: ", "dim"),
         (f"{main_settled}", "bold"),
         ("  ", ""),

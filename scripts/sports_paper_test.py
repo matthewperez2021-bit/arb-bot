@@ -1097,7 +1097,7 @@ def _render_dashboard(strategies, summaries: dict, mode: str = "PAPER"):
     """Read global bankroll and emit the unified end-of-scan dashboard."""
     main_starting = STARTING_CAPITAL_USD
     main_current  = STARTING_CAPITAL_USD
-    main_settled  = main_wins = main_losses = 0
+    main_settled  = main_wins = main_losses = main_open = 0
     try:
         conn = sqlite3.connect(SQLITE_DB_PATH)
         conn.row_factory = sqlite3.Row
@@ -1109,6 +1109,14 @@ def _render_dashboard(strategies, summaries: dict, mode: str = "PAPER"):
             main_settled  = r["total_trades"]
             main_wins     = r["wins"]
             main_losses   = r["losses"]
+        # Count trades that haven't resolved yet — anything not 'won'/'lost'
+        # is treated as open. This includes NULL and any future status.
+        open_row = conn.execute(
+            "SELECT COUNT(*) FROM sports_paper_trades "
+            "WHERE outcome IS NULL OR outcome NOT IN ('won', 'lost')"
+        ).fetchone()
+        if open_row:
+            main_open = open_row[0]
         conn.close()
     except sqlite3.OperationalError:
         pass
@@ -1140,6 +1148,7 @@ def _render_dashboard(strategies, summaries: dict, mode: str = "PAPER"):
         main_settled=main_settled,
         main_wins=main_wins,
         main_losses=main_losses,
+        main_open=main_open,
         per_strategy=per_strategy,
     )
 
