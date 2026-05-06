@@ -172,35 +172,10 @@ LLM_MODEL           = "claude-opus-4-6"     # Model used for market verification
 LLM_MAX_TOKENS      = 300
 
 # ─────────────────────────────────────────────────────────────────────
-# ODDS HARVESTER  (supplemental sportsbook data via OddsPortal)
-# Set ODDS_HARVESTER_ENABLED=True after running: pip install oddsharvester
-# then: playwright install chromium
+# HISTORICAL ODDS  (Odds API /v4/historical snapshot dumps)
+# Populated by scripts/seed_odds_api_historical.py.
 # ─────────────────────────────────────────────────────────────────────
-ODDS_HARVESTER_ENABLED        = False   # disabled 2026-05-04: OddsPortal changed their CSS — upstream OddsHarvester selectors broken (timeout on odds-format dropdown, parser misclassifies team names as bookmakers). Re-enable after `pip install --upgrade oddsharvester` ships a fix.
-ODDS_HARVESTER_REFRESH_SECS   = 7200   # re-scrape every 2 hours (batch, slow)
-ODDS_HARVESTER_CACHE_PATH     = "data/harvester_cache.json"
-ODDS_HARVESTER_HISTORICAL_DIR = "data/historical_odds/"
-
-# Mapping from arb-bot sport keys → OddsHarvester sport name
-# MMA is not supported by OddsHarvester (no OddsPortal coverage)
-ODDS_HARVESTER_SPORT_MAP: dict = {
-    "mlb":          "baseball",
-    "nba":          "basketball",
-    "nhl":          "ice-hockey",
-    "nfl":          "american-football",
-    "mls":          "football",      # OddsHarvester uses "football" for soccer
-    "tennis_atp":   "tennis",
-    "tennis_wta":   "tennis",
-}
-
-# Sharp book weights for OddsHarvester devig.
-# Pinnacle and sharp European books close closest to true probability.
-# Keys are lowercase substrings matched against bookmaker_name.
-SHARP_BOOK_WEIGHTS: dict = {
-    "pinnacle":  2.0,   # sharpest book globally — weight double
-    "bet365":    1.5,   # sharp European reference book
-    "default":   1.0,   # recreational books (DraftKings, FanDuel, etc.)
-}
+HISTORICAL_ODDS_DIR = "data/historical_odds/"
 
 # ─────────────────────────────────────────────────────────────────────
 # CALIBRATION OVERRIDES

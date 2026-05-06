@@ -26,8 +26,7 @@ data/snapshots/
 # Match cache
 data/match_cache.json
 
-# Harvester runtime caches + per-day snapshots (runtime only, not source)
-data/harvester_cache.json
+# Runtime caches + historical snapshots (regenerable, not source)
 data/historical_odds/
 data/player_prop_cache.json
 data/calibration_*.csv

@@ -46,22 +46,20 @@ Always `cd` here first in PowerShell before running any command.
 | Path | What it does |
 |---|---|
 | `config/strategies.py` | **Strategy registry** — versioned dataclasses (v1, v2, ...). Edit `ACTIVE_STRATEGY` to switch. |
-| `config/settings.py` | Global constants (API keys, fees, exchange URLs, OddsHarvester settings). |
+| `config/settings.py` | Global constants (API keys, fees, exchange URLs, thresholds). |
 | `scripts/sports_paper_test.py` | The main scan + trade pipeline. Takes `--strategy` and `--strategies`. |
-| `scripts/sports_scheduler.py` | Hourly background loop. Runs resolver then paper test. Refreshes OddsHarvester cache every 2h. |
+| `scripts/sports_scheduler.py` | Hourly background loop. Runs resolver then paper test. |
 | `scripts/resolve_trades.py` | Checks Kalshi for settled markets, updates P&L + bankroll. |
 | `scripts/view_trades.py` | Read-only viewer. Flags: `--status`, `--strategies`, `--session`, `--all` |
 | `scripts/analyze_performance.py` | Slices settled trades by side/sport/edge/legs/etc. |
-| `scripts/calibration_report.py` | **NEW** — Predicted vs actual win rate by edge bucket + sport, plus CLV summary. |
-| `scripts/seed_backtest_data.py` | Seeds `data/historical_odds/` with per-bookmaker data for backtesting. |
+| `scripts/calibration_report.py` | Predicted vs actual win rate by edge bucket + sport, plus CLV summary. |
+| `scripts/seed_odds_api_historical.py` | Seeds `data/historical_odds/{sport}/` with snapshots from The Odds API `/v4/historical` endpoints. |
 | `clients/kalshi.py` | Kalshi API client (auth, orderbook, market lookup, `is_market_resolved`). |
-| `clients/odds_api.py` | Odds API client (h2h + player props + **totals**, devig logic, caches). |
-| `clients/odds_harvester_client.py` | OddsHarvester wrapper — scrapes OddsPortal, devigs decimal odds (Pinnacle-weighted), builds team prob cache, archives daily snapshots. |
+| `clients/odds_api.py` | Odds API client (h2h + player props + **totals** + **historical**, devig logic, caches). |
 | `detection/odds_arb_scanner.py` | Core: parses KXMVE titles, prices legs (incl. **totals**), applies same-game correlation uplift, computes net edge. |
 | `detection/kxmve_parser.py` | Parses parlay titles into structured legs (team_win, player_over, total_over). |
 | `data/arb_positions.db` | SQLite DB. Tables: `sports_paper_trades`, `bankroll`, `strategy_bankrolls`. |
-| `data/harvester_cache.json` | OddsHarvester team prob cache (auto-written, 2h TTL). |
-| `data/historical_odds/{date}/` | Daily snapshots — every harvester refresh writes timestamped JSON for backtesting. |
+| `data/historical_odds/{sport}/` | Per-sport historical snapshots fetched by `seed_odds_api_historical.py`. |
 | `pyproject.toml` | pytest config: scopes test collection to `tests/` only. |
 
 ---
@@ -74,8 +72,15 @@ python scripts/sports_paper_test.py                           # uses ACTIVE_STRA
 python scripts/sports_paper_test.py --strategy v2             # force a version
 python scripts/sports_paper_test.py --strategies v1,v2        # A/B (each gets FULL bankroll)
 python scripts/sports_scheduler.py --strategies v1,v2         # hourly background loop
-python scripts/sports_scheduler.py --no-harvester             # skip OddsHarvester refresh
 ```
+
+### Historical seeding (Odds API paid tier)
+```powershell
+python scripts/seed_odds_api_historical.py --sport mlb --max-snapshots 5      # quick smoke
+python scripts/seed_odds_api_historical.py --sport mlb,nba --markets h2h,spreads,totals
+python scripts/seed_odds_api_historical.py --start 2026-05-06T00:00:00Z --end 2026-04-01T00:00:00Z
+```
+Walks the `previous_timestamp` chain backward. Writes snapshots to `data/historical_odds/{sport_key}/{iso}.json`. Quota-aware (`--quota-floor`).
 
 ### Settle / resolve
 ```powershell
@@ -106,7 +111,7 @@ git push
 ```
 
 What's tracked: `data/arb_positions.db` only.
-What's NOT tracked (regenerable): `*.log`, `harvester_cache.json`, `historical_odds/`, `player_prop_cache.json`, `snapshots/`, `*.db-shm`, `*.db-wal`, `arb_positions.db.bak`.
+What's NOT tracked (regenerable): `*.log`, `historical_odds/`, `player_prop_cache.json`, `snapshots/`, `*.db-shm`, `*.db-wal`, `arb_positions.db.bak`.
 
 To recover trade history on a fresh clone: `git pull` is enough — no import step.
 
@@ -191,10 +196,9 @@ Or override per-run with `--strategy v1`.
               "yes Lakers, no Bucks +5.5, yes LeBron 25+ pts" → 3 leg objects
 
 3. PRICE  →  For each leg:
-              - team_win/team_spread → devigged sportsbook consensus
-                (falls back to OddsHarvester cache when Odds API has no line)
+              - team_win/team_spread → devigged sportsbook consensus (Odds API)
               - player_over → devigged Over/Under from prop cache
-              - total_over → devigged Over/Under from totals_cache  (NEW)
+              - total_over → devigged Over/Under from totals_cache
 
 4. COMBINE → Group priced legs by event_id, multiply within groups, then:
               - For groups with 2+ legs from same game: apply per-sport
@@ -244,36 +248,6 @@ These are intentional behaviors — don't "fix" them:
 
 ---
 
-## OddsHarvester Integration (added 2026-05-01)
-
-Supplemental sportsbook data source via OddsPortal scraping (Playwright-based).
-Runs on a 2h batch cycle — never blocks the 45s scan loop.
-
-**To activate:**
-```powershell
-pip install oddsharvester playwright
-python -m playwright install chromium
-# In config/settings.py: ODDS_HARVESTER_ENABLED = True (currently True as of 2026-05-04)
-```
-
-**How it fits in:**
-- `OddsHarvesterClient.fetch_upcoming()` scrapes per-bookmaker decimal odds for 6 sports
-- **Sharp book weighting** — Pinnacle 2x, Bet365 1.5x, recreational 1x in devig
-- Stores `{team_norm: {prob, n_books, sport, bookmaker_breakdown}}` in `data/harvester_cache.json`
-- **Daily snapshot archive** — every refresh also writes `data/historical_odds/{date}/{sport}_{HHMM}.json`
-  (accumulates dataset for backtest.py)
-- `OddsArbScanner._price_team_leg()` checks harvester as fallback when Odds API has no line,
-  or uses harvester if it has more bookmakers contributing
-- `seed_backtest_data.py` uses the `scrape_historic` mode for retroactive season data
-
-**Sport mapping:** mlb→baseball, nba→basketball, nhl→ice-hockey, nfl→american-football,
-mls→football, tennis_atp→tennis. MMA not covered by OddsPortal.
-
-**Known issue:** `CommandEnum.UPCOMING_MATCHES` required (plain string "scrape_upcoming" fails).
-Already fixed in `odds_harvester_client.py`.
-
----
-
 ## Historical Data Pipeline (added 2026-05-04)
 
 Three-piece system to validate edge accuracy and improve calibration over time.
@@ -293,16 +267,16 @@ the bucket as systematically over-estimating edge → Kelly oversized → tighte
 predicted win prob is `(1 - fair_prob)`, not `fair_prob`. Calibration factors are
 now meaningful for both sides.
 
-### 3. Daily snapshot archiving
-OddsHarvester refresh writes timestamped snapshots to `data/historical_odds/`,
-splitting by sport. Backtest.py (still a stub) will eventually replay these.
+### 3. Snapshot archiving (Odds API historical)
+`scripts/seed_odds_api_historical.py` walks The Odds API's `previous_timestamp` chain backward and writes per-sport JSON snapshots to `data/historical_odds/{sport_key}/{iso}.json`. `backtest.py` (still a stub) will eventually replay these. Run on demand — not part of the live scan loop.
 
 ---
 
 ## Open Roadmap Items (not yet built)
 
-- **`scripts/backtest.py`** — implement from stub once 2-4 weeks of harvester
-  snapshots have accumulated. Replay strategies against historical odds.
+- **`scripts/backtest.py`** — implement from stub once a few weeks of Odds API
+  snapshots have accumulated via `seed_odds_api_historical.py`. Replay
+  strategies against historical odds.
 - **CALIBRATION_OVERRIDES** in settings.py — placeholder dict; populate from
   calibration_report.py findings to apply Kelly multipliers per sport/bucket.
 - **Player→event mapping** — currently player_over legs don't get an event_id,
@@ -322,11 +296,11 @@ splitting by sport. Backtest.py (still a stub) will eventually replay these.
 - **Python:** 3.14 (per the user's installation)
 - **Database:** SQLite at `data/arb_positions.db`
 - **Logs:** `data/sports_scheduler.log`, `data/sports_paper_test.log`
-- **APIs used:** Kalshi (real account), The Odds API (Starter tier, 5000 req/mo), OddsHarvester (free, OddsPortal scraping — disabled by default)
+- **APIs used:** Kalshi (real account), The Odds API (paid tier with historical-snapshot access)
 - **Repo:** https://github.com/matthewperez2021-bit/arb-bot (push to `main`)
 
 ---
 
 ## Quick Brief When Starting a New Chat
 
-> I'm working on an automated sports arbitrage bot at `C:\Users\mpere\Documents\Claude\Projects\Arb Project\arb-bot`. It paper-trades Kalshi KXMVE multi-leg sports markets vs sportsbook consensus prices from The Odds API + OddsHarvester. Active strategy is v2 (4-8% edge band, NBA/NHL excluded, half-Kelly). 90 settled trades on v1 showed MLB +88% / MLS -2% / NBA -47% / NHL -46% ROI, and edges above 8% are model error. Just shipped same-game correlation uplift, totals leg pricing, CLV tracking, and calibration_report.py. Read `CONTEXT.md` for full state. I want to [DESCRIBE TASK].
+> I'm working on an automated sports arbitrage bot at `C:\Users\mpere\Documents\Claude\Projects\Arb Project\arb-bot`. It paper-trades Kalshi KXMVE multi-leg sports markets vs sportsbook consensus prices from The Odds API (live + historical snapshots). Active strategy is v2 (4-8% edge band, NBA/NHL excluded, half-Kelly). 90 settled trades on v1 showed MLB +88% / MLS -2% / NBA -47% / NHL -46% ROI, and edges above 8% are model error. Recent shipped work: same-game correlation uplift, totals leg pricing, CLV tracking, calibration_report.py, and Odds API historical seeder (replaced abandoned OddsHarvester scraper). Read `CONTEXT.md` for full state. I want to [DESCRIBE TASK].

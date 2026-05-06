@@ -8,11 +8,9 @@ Usage:
     python scripts/sports_scheduler.py --strategy v2            # force a specific version
     python scripts/sports_scheduler.py --strategies v1,v2       # A/B mode
     python scripts/sports_scheduler.py --capital 2000           # custom bankroll
-    python scripts/sports_scheduler.py --no-harvester           # skip OddsHarvester refresh
 """
 
 import argparse
-import asyncio
 import os
 import subprocess
 import sys
@@ -36,8 +34,6 @@ def main():
     parser.add_argument("--strategies",    type=str,   default=None,
                         help="A/B mode: comma-separated, e.g. 'v1,v2'. "
                              "Splits capital evenly.")
-    parser.add_argument("--no-harvester",  action="store_true",
-                        help="Disable OddsHarvester background refresh for this session")
     args = parser.parse_args()
 
     interval_secs = args.interval * 60
@@ -45,19 +41,13 @@ def main():
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
     # All subprocess calls run from the arb-bot dir so config/data paths resolve.
     os.chdir(ARB_BOT_DIR)
+    sys.path.insert(0, ARB_BOT_DIR)
 
     mode_label = (f"A/B [{args.strategies}]" if args.strategies
                   else f"single [{args.strategy or 'ACTIVE'}]")
 
-    # ── OddsHarvester setup ──────────────────────────────────────────
-    sys.path.insert(0, ARB_BOT_DIR)
-    from config.settings import ODDS_HARVESTER_ENABLED, ODDS_HARVESTER_REFRESH_SECS
-    use_harvester = ODDS_HARVESTER_ENABLED and not args.no_harvester
-    harvester_last_refresh: float = 0.0   # force refresh on first run
-
     print(f"[scheduler] Starting - scan every {args.interval} min | "
           f"capital=${args.capital:.0f} | strategy={mode_label}")
-    print(f"[scheduler] OddsHarvester: {'enabled' if use_harvester else 'disabled'}")
     print(f"[scheduler] Output logged to: {log_path}")
     print(f"[scheduler] Press Ctrl+C to stop\n")
 
@@ -73,20 +63,6 @@ def main():
         run_number += 1
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"[scheduler] === Run #{run_number} at {now} ===")
-
-        # ── OddsHarvester refresh (every 2h, non-blocking) ──────────────
-        if use_harvester:
-            age = time.time() - harvester_last_refresh
-            if age >= ODDS_HARVESTER_REFRESH_SECS:
-                print(f"[scheduler] OddsHarvester: refreshing cache (age={age/3600:.1f}h)...")
-                try:
-                    from clients.odds_harvester_client import OddsHarvesterClient
-                    client = OddsHarvesterClient()
-                    asyncio.run(client.fetch_upcoming())
-                    harvester_last_refresh = time.time()
-                    print("[scheduler] OddsHarvester: cache refreshed")
-                except Exception as exc:
-                    print(f"[scheduler] OddsHarvester: refresh failed — {exc}")
 
         with open(log_path, "a", encoding="utf-8") as logf:
             logf.write(f"\n{'='*70}\n")

@@ -315,6 +315,95 @@ class OddsAPIClient:
         return all_events
 
     # ─────────────────────────────────────────────────────────────────
+    # Historical snapshots  (paid tier — higher per-call cost than live)
+    # ─────────────────────────────────────────────────────────────────
+
+    def get_historical_events_snapshot(
+        self,
+        sport: str,
+        snapshot_iso: str,
+        regions:     str  = "us",
+        markets:     str  = "h2h",
+        bookmakers:  list = None,
+        odds_format: str  = "american",
+    ) -> dict:
+        """
+        Fetch a historical odds snapshot for all events in a sport at one timestamp.
+
+        Wraps GET /v4/historical/sports/{sport}/odds.
+
+        Args:
+            sport:        sport key (e.g. "baseball_mlb") or SPORTS shorthand
+            snapshot_iso: ISO 8601 timestamp, e.g. "2026-04-01T12:00:00Z"
+            regions:      "us" by default
+            markets:      "h2h" / "spreads" / "totals" (or comma-list)
+            bookmakers:   list of book keys; defaults to DEFAULT_BOOKMAKERS
+
+        Returns the full envelope:
+            {
+              "timestamp":          "2026-04-01T12:00:00Z",
+              "previous_timestamp": "2026-04-01T11:55:00Z" or None,
+              "next_timestamp":     "2026-04-01T12:05:00Z" or None,
+              "data": [ {event with bookmakers...}, ... ]
+            }
+
+        Walk backward in time by re-calling with snapshot_iso=previous_timestamp.
+        """
+        sport_key = SPORTS.get(sport, sport)
+        books = ",".join(bookmakers or DEFAULT_BOOKMAKERS)
+        params = {
+            "date":       snapshot_iso,
+            "regions":    regions,
+            "markets":    markets,
+            "bookmakers": books,
+            "oddsFormat": odds_format,
+            "dateFormat": "iso",
+        }
+        envelope = self._get(f"/v4/historical/sports/{sport_key}/odds/", params=params)
+        n = len(envelope.get("data", [])) if isinstance(envelope, dict) else 0
+        log.info("OddsAPI[historical]: %s @ %s — %d events", sport_key, snapshot_iso, n)
+        return envelope
+
+    def get_historical_event_snapshot(
+        self,
+        sport:        str,
+        event_id:     str,
+        snapshot_iso: str,
+        regions:      str  = "us",
+        markets:      str  = "h2h",
+        bookmakers:   list = None,
+        odds_format:  str  = "american",
+    ) -> dict:
+        """
+        Fetch a historical snapshot for ONE event (incl. richer markets like
+        player props that aren't in the sport-level endpoint).
+
+        Wraps GET /v4/historical/sports/{sport}/events/{eventId}/odds.
+
+        Returns the same envelope shape as get_historical_events_snapshot but
+        with a single event in `data` (not a list).
+        """
+        sport_key = SPORTS.get(sport, sport)
+        books = ",".join(bookmakers or DEFAULT_BOOKMAKERS)
+        params = {
+            "date":       snapshot_iso,
+            "regions":    regions,
+            "markets":    markets,
+            "bookmakers": books,
+            "oddsFormat": odds_format,
+            "dateFormat": "iso",
+        }
+        envelope = self._get(
+            f"/v4/historical/sports/{sport_key}/events/{event_id}/odds/",
+            params=params,
+        )
+        log.info(
+            "OddsAPI[historical]: %s/%s @ %s",
+            sport_key, event_id, snapshot_iso,
+        )
+        return envelope
+
+    # ─────────────────────────────────────────────────────────────────
     # Totals (game over/under)
     # ─────────────────────────────────────────────────────────────────
 
