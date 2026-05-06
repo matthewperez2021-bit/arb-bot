@@ -161,6 +161,20 @@ The bot writes `data/sports_scheduler.log` in UTF-8 with Unicode box-drawing bor
 
 Default filter matches `STRATEGY|filters dropped|Trades placed|Run #` — the lines you care about for tracking what each strategy is doing per scan.
 
+### Merging two DBs (cross-machine reconciliation)
+SQLite is binary — git can't merge it. If two machines accidentally both wrote to the DB and you want to combine their trade histories instead of picking a winner:
+
+```powershell
+# On the machine you want to be authoritative (target):
+python scripts/merge_db.py --source path\to\other_machine_copy.db --dry-run   # preview
+python scripts/merge_db.py --source path\to\other_machine_copy.db             # apply
+python scripts/resolve_trades.py                                              # refresh bankroll
+```
+
+`merge_db.py` walks `sports_paper_trades` from the source DB and INSERTs only the rows whose `(kalshi_ticker, opened_at, strategy_version)` tuple isn't already in the target. Other tables (`bankroll`, `strategy_bankrolls`) are NOT merged — they're aggregate state derivable from `sports_paper_trades`. After the row merge, run `resolve_trades.py` and let the scheduler scan once so the aggregates catch up.
+
+Default `--target` is `data/arb_positions.db` in the current dir.
+
 ### Diagnostic queries
 ```powershell
 # Trades placed since a given timestamp, grouped by strategy
