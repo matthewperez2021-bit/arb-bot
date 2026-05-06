@@ -28,6 +28,7 @@ data/match_cache.json
 
 # Runtime caches + historical snapshots (regenerable, not source)
 data/historical_odds/
+data/historical_kalshi/
 data/player_prop_cache.json
 data/calibration_*.csv
 data/backtest_timeline.csv

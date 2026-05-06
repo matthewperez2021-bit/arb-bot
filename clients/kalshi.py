@@ -287,6 +287,62 @@ class KalshiClient:
         return self._request("GET", f"/markets/{ticker}")
 
     # ─────────────────────────────────────────────────────────────────
+    # Historical candlesticks
+    # ─────────────────────────────────────────────────────────────────
+
+    def get_candlesticks(
+        self,
+        series_ticker: str,
+        market_ticker: str,
+        start_ts: int,
+        end_ts: int,
+        period_minutes: int = 60,
+    ) -> dict:
+        """
+        Fetch historical candlestick data for one Kalshi market.
+
+        Wraps GET /series/{series_ticker}/markets/{market_ticker}/candlesticks.
+
+        Args:
+            series_ticker:   the series this market belongs to (e.g. "KXMVE",
+                             "KXNBAGAME"). Find it via get_market(ticker)["series_ticker"].
+            market_ticker:   full market ticker.
+            start_ts:        Unix seconds (inclusive).
+            end_ts:          Unix seconds (inclusive). Kalshi caps the span the
+                             API will return at one go — for long ranges, page
+                             externally.
+            period_minutes:  bucket size. Allowed: 1 (minute), 60 (hour),
+                             1440 (daily). Defaults to 60.
+
+        Returns the raw envelope:
+            {
+              "ticker": "...",
+              "candlesticks": [
+                {
+                  "end_period_ts":     <unix int>,
+                  "yes_bid":           {"open_dollars","high_dollars",
+                                        "low_dollars","close_dollars"},   # "0.4500" strings
+                  "yes_ask":           {...same shape...},
+                  "price":             {} when no trades, else OHLC of last trade,
+                  "volume_fp":         "0.00" string,
+                  "open_interest_fp":  "0.00" string,
+                },
+                ...
+              ]
+            }
+
+        Bid/ask are dollar-formatted strings on the 0–1 probability scale.
+        Empty `price` dicts mean no trades occurred during that bucket.
+        """
+        path = f"/series/{series_ticker}/markets/{market_ticker}/candlesticks"
+        params = {
+            "start_ts":        int(start_ts),
+            "end_ts":          int(end_ts),
+            "period_interval": int(period_minutes),
+        }
+        return self._request("GET", path, params=params)
+
+    # ─────────────────────────────────────────────────────────────────
     # Order book
     # ─────────────────────────────────────────────────────────────────
 

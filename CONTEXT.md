@@ -54,6 +54,7 @@ Always `cd` here first in PowerShell before running any command.
 | `scripts/analyze_performance.py` | Slices settled trades by side/sport/edge/legs/etc. |
 | `scripts/calibration_report.py` | Predicted vs actual win rate by edge bucket + sport, plus CLV summary. |
 | `scripts/seed_odds_api_historical.py` | Seeds `data/historical_odds/{sport}/` with snapshots from The Odds API `/v4/historical` endpoints. |
+| `scripts/seed_kalshi_historical.py` | Seeds `data/historical_kalshi/` with per-market candlestick price history from Kalshi. Modes: `--from-trades`, `--ticker`, `--series`. |
 | `scripts/backtest.py` | Replays seeded snapshots → per-(snapshot, event) consensus timeline. Optional `--csv` export. |
 | `clients/kalshi.py` | Kalshi API client (auth, orderbook, market lookup, `is_market_resolved`). |
 | `clients/odds_api.py` | Odds API client (h2h + player props + **totals** + **historical**, devig logic, caches). |
@@ -83,17 +84,27 @@ python scripts/seed_odds_api_historical.py --start 2026-05-06T00:00:00Z --end 20
 ```
 Walks the `previous_timestamp` chain backward. Writes snapshots to `data/historical_odds/{sport_key}/{iso}.json`. Quota-aware (`--quota-floor`). Skips files already on disk unless `--overwrite`.
 
+### Kalshi historical seeding
+```powershell
+python scripts/seed_kalshi_historical.py --from-trades --limit 5    # 5 most recent settled trades
+python scripts/seed_kalshi_historical.py --from-trades              # ALL settled trade tickers
+python scripts/seed_kalshi_historical.py --ticker KXMVE...-... --start 2026-05-01T00:00:00Z --end 2026-05-06T00:00:00Z
+python scripts/seed_kalshi_historical.py --series KXMVECROSSCATEGORY --limit 20
+python scripts/seed_kalshi_historical.py --period 1                 # minute-resolution (3.5-day max window)
+```
+Writes per-ticker candle files to `data/historical_kalshi/{ticker}.json`. Default period is hourly. Skips files already on disk unless `--overwrite`. `--from-trades` mode auto-derives the window per ticker from `opened_at`/`resolved_at` (with `--pad-hours` padding).
+
 ### Backtest replay (offline)
 ```powershell
 python scripts/backtest.py                                    # all sports on disk
 python scripts/backtest.py --sport mlb                        # one sport
 python scripts/backtest.py --sport mlb,nba --csv              # combined CSV export
 ```
-Reads seeded snapshots, devigs each event, prints summary (snapshot count, books/event, home_prob drift). With `--csv`, writes `data/backtest_timeline.csv`. Pure offline replay — no API calls, no quota cost.
+Reads seeded Odds API snapshots, devigs each event, prints summary (snapshot count, books/event, home_prob drift). With `--csv`, writes `data/backtest_timeline.csv`. Pure offline replay — no API calls, no quota cost.
 
 **Limitations:**
 - Lines for in-progress games freeze; their consensus probs reflect the score, not pre-game truth. Filter on `commence_time > snapshot_iso` for clean training data.
-- No Kalshi historical prices on disk yet → no full strategy P&L replay. Adding a Kalshi candlesticks seeder unlocks v1/v2/v3/v4 what-if simulation.
+- `backtest.py` currently consumes only the Odds API side. To run a full v1/v2/v3/v4 strategy P&L replay, it needs to also consume `data/historical_kalshi/*.json` (seeded by `seed_kalshi_historical.py`) and join them on `(timestamp, event_id)`. That join is the next build step.
 
 ### Settle / resolve
 ```powershell
@@ -287,10 +298,11 @@ now meaningful for both sides.
 
 ## Open Roadmap Items (not yet built)
 
-- **Kalshi historical seeder** — Kalshi exposes `/markets/{ticker}/candlesticks`.
-  A sibling to `seed_odds_api_historical.py` would seed `data/historical_kalshi/`
-  with KXMVE price history. Once both sides exist, `backtest.py` can run a true
-  per-strategy P&L replay (instead of just the consensus timeline it produces today).
+- **Wire Kalshi history into `backtest.py`** — both seeders now exist
+  (`seed_odds_api_historical.py` for sportsbook lines, `seed_kalshi_historical.py`
+  for KXMVE candles). Next step: extend `backtest.py` to join the two on
+  `(timestamp, event_id)` so it can replay each strategy's filter + sizing
+  decisions against real historical prices and emit a per-strategy P&L curve.
 - **CALIBRATION_OVERRIDES** in settings.py — placeholder dict; populate from
   calibration_report.py findings to apply Kelly multipliers per sport/bucket.
 - **Player→event mapping** — currently player_over legs don't get an event_id,
