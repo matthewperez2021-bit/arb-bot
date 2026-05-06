@@ -30,6 +30,7 @@ data/match_cache.json
 data/historical_odds/
 data/player_prop_cache.json
 data/calibration_*.csv
+data/backtest_timeline.csv
 
 # Logs
 *.log
